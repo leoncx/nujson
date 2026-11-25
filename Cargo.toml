@@ -1,0 +1,9 @@
+[package]
+name = "nujson"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.105"
+clap = { version = "4.6.10", features = ["derive"] }
+ratatui = "0.30.2"
