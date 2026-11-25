@@ -10,6 +10,7 @@ use ratatui::text::Line;
 
 use crate::filter::{FilterKind, Job, JobResult, Spec};
 use crate::prompt::{Outcome, Prompt};
+use crate::render::highlight::{highlight_line, match_style};
 use crate::render::pretty::{Theme, pretty};
 use crate::source::Source;
 use crate::ui;
@@ -28,6 +29,7 @@ pub enum Validity {
 pub struct DetailCache {
     pub line: usize,
     pub color: bool,
+    pub highlight: Option<String>,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -62,6 +64,8 @@ pub struct App {
     pub job: Option<Job>,
     /// One-off error message shown in the footer until the next key press.
     pub status: Option<String>,
+    /// Whether the key help popup is shown; any key closes it.
+    pub show_help: bool,
     /// Open input prompt; while set, it receives all keys.
     pub prompt: Option<Prompt>,
     validity: Vec<Validity>,
@@ -91,6 +95,7 @@ impl App {
             filter: None,
             job: None,
             status: None,
+            show_help: false,
             prompt: None,
             validity,
             detail_cache: None,
@@ -118,15 +123,33 @@ impl App {
         self.validity[i]
     }
 
+    /// Query of the active text filter, whose matches get highlighted.
+    pub fn highlight_query(&self) -> Option<&str> {
+        self.filter
+            .as_ref()
+            .filter(|f| f.kind == FilterKind::Text)
+            .map(|f| f.query.as_str())
+    }
+
     /// Styled lines for the detail pane of line `i`, rendered once per
-    /// (line, color) and cached.
+    /// (line, color, highlight) and cached.
     pub fn detail_lines(&mut self, i: usize) -> &[Line<'static>] {
-        let fresh = matches!(&self.detail_cache, Some(c) if c.line == i && c.color == self.color);
+        let highlight = self.highlight_query().map(str::to_string);
+        let fresh = matches!(&self.detail_cache,
+            Some(c) if c.line == i && c.color == self.color && c.highlight == highlight);
         if !fresh {
-            let lines = render_detail(&self.source, i, self.color);
+            let mut lines = render_detail(&self.source, i, self.color);
+            if let Some(q) = &highlight {
+                let hl = match_style(self.color);
+                lines = lines
+                    .into_iter()
+                    .map(|l| highlight_line(l, q, hl))
+                    .collect();
+            }
             self.detail_cache = Some(DetailCache {
                 line: i,
                 color: self.color,
+                highlight,
                 lines,
             });
         }
@@ -159,6 +182,10 @@ impl App {
             self.should_quit = true;
             return;
         }
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
         if let Some(prompt) = &mut self.prompt {
             match prompt.on_key(code, mods) {
                 Outcome::Editing => {}
@@ -184,6 +211,7 @@ impl App {
         }
         match code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('?') => self.show_help = true,
             KeyCode::Esc if self.job.is_some() => self.job = None,
             KeyCode::Esc if self.filter.is_some() => self.clear_filter(),
             KeyCode::Esc => self.focus = Focus::List,
@@ -513,6 +541,39 @@ mod tests {
         assert_eq!(a.filter.as_ref().unwrap().query, "1");
         press(&mut a, KeyCode::Esc);
         assert!(a.filter.is_none());
+    }
+
+    #[test]
+    fn help_popup_closes_on_any_key() {
+        let mut a = app_with_lines(3);
+        press(&mut a, KeyCode::Char('?'));
+        assert!(a.show_help);
+        press(&mut a, KeyCode::Char('q'));
+        assert!(!a.show_help);
+        assert!(!a.should_quit, "key closing help is not processed further");
+    }
+
+    #[test]
+    fn text_filter_highlights_detail() {
+        let mut a = app_with_lines(3);
+        a.text_now("\"i\"");
+        let spans = &a.detail_lines(0)[1].spans;
+        let hl = match_style(true);
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.content == "\"i\"" && s.style == Theme::colored().key.patch(hl)),
+            "{spans:?}"
+        );
+        // jq filters do not highlight.
+        a.start_filter(Spec::new(FilterKind::Jq, ".i")).unwrap();
+        a.wait_job();
+        assert!(
+            a.detail_lines(1)[1]
+                .spans
+                .iter()
+                .all(|s| s.style.bg.is_none())
+        );
     }
 
     #[test]

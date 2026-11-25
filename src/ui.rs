@@ -2,10 +2,11 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Validity};
 use crate::prompt::Prompt;
+use crate::render::highlight::{highlight_line, match_style};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // The footer grows by one line to show a prompt error.
@@ -21,6 +22,60 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_list(frame, app, left);
     draw_detail(frame, app, right);
     draw_footer(frame, app, footer);
+    if app.show_help {
+        draw_help(frame);
+    }
+}
+
+const HELP: &[(&str, &str)] = &[
+    ("↑↓ j k", "move selection / scroll detail"),
+    ("PgUp PgDn Space", "page"),
+    ("g G Home End", "first / last"),
+    ("Tab", "switch pane (Enter/l → detail, h → list)"),
+    ("← →", "scroll detail horizontally (wrap off)"),
+    ("/", "text filter (smart case)"),
+    ("|", "jq filter, e.g. .level == \"error\""),
+    ("Esc", "cancel running filter / clear filter"),
+    ("w", "toggle line wrap"),
+    ("c", "toggle JSON colors"),
+    ("?", "this help"),
+    ("q  Ctrl-C", "quit"),
+];
+
+fn draw_help(frame: &mut Frame) {
+    let key_w = HELP
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line> = HELP
+        .iter()
+        .map(|(k, d)| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {k:<key_w$}  "),
+                    Style::new().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(*d),
+            ])
+        })
+        .collect();
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 3;
+    let height = lines.len() as u16 + 2;
+    let area = frame.area().centered(
+        Constraint::Length(width.min(frame.area().width)),
+        Constraint::Length(height.min(frame.area().height)),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .title(" Keys ")
+                .title_bottom(Line::from(" any key to close ").right_aligned())
+                .border_style(Style::new().fg(Color::Cyan)),
+        ),
+        area,
+    );
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -79,6 +134,9 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     // "▶" + "✗" + number + " "
     let preview_width = (inner.width as usize).saturating_sub(num_width + 3);
 
+    let highlight = app.highlight_query().map(str::to_string);
+    let hl = match_style(app.color);
+
     let end = (app.list_offset + height).min(app.visible.len());
     let mut rows = Vec::with_capacity(end - app.list_offset);
     for pos in app.list_offset..end {
@@ -99,8 +157,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(if is_sel { "▶" } else { " " }),
             status,
             Span::styled(format!("{:>num_width$} ", line + 1), dim()),
-            Span::raw(preview),
         ]);
+        let preview = Line::from(preview);
+        let preview = match &highlight {
+            Some(q) => highlight_line(preview, q, hl),
+            None => preview,
+        };
+        let mut row = row;
+        row.spans.extend(preview.spans);
         rows.push(if is_sel {
             row.style(Style::new().add_modifier(Modifier::REVERSED))
         } else {
@@ -181,6 +245,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     if app.focus == Focus::Detail && !app.wrap {
         key("←→", "scroll".into());
     }
+    key("?", "help".into());
     key("w", format!("wrap ({})", on_off(app.wrap)));
     key("c", format!("color ({})", on_off(app.color)));
     key("q", "quit".into());

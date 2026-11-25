@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::fs::File;
+use std::io::Read;
 use std::ops::{Deref, Range};
 use std::path::Path;
 
@@ -14,6 +15,8 @@ use memmap2::Mmap;
 
 enum Bytes {
     Mapped(Mmap),
+    /// Data read into memory, e.g. from stdin.
+    Owned(Vec<u8>),
     /// Used for empty files: mapping a zero-length file fails on some platforms.
     Empty,
 }
@@ -23,6 +26,7 @@ impl Deref for Bytes {
     fn deref(&self) -> &[u8] {
         match self {
             Bytes::Mapped(m) => m,
+            Bytes::Owned(v) => v,
             Bytes::Empty => &[],
         }
     }
@@ -49,6 +53,15 @@ impl Source {
                     .with_context(|| format!("cannot map {}", path.display()))?,
             )
         };
+        let lines = index_lines(&bytes);
+        Ok(Self { bytes, lines })
+    }
+
+    /// Read all of `reader` (e.g. stdin) into memory.
+    pub fn read_all(mut reader: impl Read) -> Result<Self> {
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).context("cannot read input")?;
+        let bytes = Bytes::Owned(data);
         let lines = index_lines(&bytes);
         Ok(Self { bytes, lines })
     }
@@ -132,6 +145,13 @@ mod tests {
         assert_eq!(src.len(), 2);
         assert_eq!(src.line(0), "{\"a\":1}");
         assert_eq!(src.line(1), "\u{FFFD}");
+    }
+
+    #[test]
+    fn read_all_from_reader() {
+        let src = Source::read_all(&b"{}\r\n[1]"[..]).unwrap();
+        assert_eq!(src.len(), 2);
+        assert_eq!(src.line(1), "[1]");
     }
 
     #[test]

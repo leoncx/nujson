@@ -58,7 +58,7 @@ src/
 - [x] **M3 Pretty + highlight** — renderer, theme, `c` toggle, `--no-color`, `NO_COLOR` env.
 - [x] **M4 Text filter** — `/` prompt, smart-case substring, match count, Esc clears (selection kept). `n/N` dropped: the list is already filtered.
 - [x] **M5 jq filter** — `|` prompt and `-f/--filter EXPR`, jaq 3, compile errors shown above the prompt, filters run on all cores in the background with progress; Esc cancels.
-- [ ] **M6 Polish** — help popup, match highlighting in detail, stdin input, release binaries (`cargo-dist`).
+- [x] **M6 Polish** — `?` help popup, text-match highlighting (list + detail), stdin / pipe / `<(cmd)` input, README, release workflow (hand-written GitHub Actions instead of `cargo-dist`).
 - [ ] **M7 Later** — follow mode (`-f`), copy to clipboard, jq projection of detail view, config file.
 
 ## Testing

@@ -2,6 +2,7 @@
 //! contains an uppercase character.
 
 use std::cell::RefCell;
+use std::ops::Range;
 
 use memchr::memmem::Finder;
 
@@ -58,9 +59,54 @@ impl Matcher for TextMatcher {
     }
 }
 
+/// Byte ranges of the non-overlapping occurrences of `query` in `hay`, with
+/// the same smart-case rule as [`TextMatcher`]. Used to highlight matches.
+pub fn find_ranges(query: &str, hay: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    if query.chars().any(char::is_uppercase) {
+        return hay
+            .match_indices(query)
+            .map(|(i, m)| i..i + m.len())
+            .collect();
+    }
+    // Lowercasing can change byte lengths, so keep a map from each byte of
+    // the lowercased text back to the start of its original char.
+    let mut lower = String::with_capacity(hay.len());
+    let mut origin = Vec::with_capacity(hay.len() + 1);
+    for (i, ch) in hay.char_indices() {
+        for lc in ch.to_lowercase() {
+            lower.push(lc);
+            origin.extend(std::iter::repeat_n(i, lc.len_utf8()));
+        }
+    }
+    origin.push(hay.len());
+    let needle = query.to_lowercase();
+    lower
+        .match_indices(&needle)
+        .map(|(i, _)| origin[i]..origin[i + needle.len()])
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_ranges_smart_case_and_unicode() {
+        assert_eq!(find_ranges("ab", "xABxab"), vec![1..3, 4..6]);
+        assert_eq!(find_ranges("AB", "xABxab"), vec![1..3]);
+        // "É" is 2 bytes; ranges must point into the original string.
+        let hay = "aÉtÉ été";
+        let r = find_ranges("été", hay);
+        assert_eq!(
+            r.iter().map(|r| &hay[r.clone()]).collect::<Vec<_>>(),
+            ["ÉtÉ", "été"]
+        );
+        assert!(find_ranges("", "abc").is_empty());
+    }
 
     fn m(q: &str, line: &str) -> bool {
         TextMatcher::new(q).matches(line.as_bytes())
