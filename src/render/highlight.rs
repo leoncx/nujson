@@ -1,17 +1,9 @@
 //! Highlight text-filter matches inside already-styled lines.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::filter::text::find_ranges;
-
-pub fn match_style(color: bool) -> Style {
-    if color {
-        Style::new().bg(Color::Yellow).fg(Color::Black)
-    } else {
-        Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-    }
-}
 
 /// Split the spans of `line` so occurrences of `query` (smart case) are
 /// patched with `hl`, keeping the original styles elsewhere. Matches may
@@ -57,6 +49,8 @@ pub fn highlight_line(line: Line<'static>, query: &str, hl: Style) -> Line<'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::pretty::Theme;
+    use ratatui::style::Color;
 
     #[test]
     fn splits_spans_and_crosses_boundaries() {
@@ -66,7 +60,7 @@ mod tests {
             Span::raw(": "),
             Span::raw("\"error\""),
         ]);
-        let hl = match_style(true);
+        let hl = Theme::colored().matched;
         let out = highlight_line(line, "l\": \"err", hl);
         let parts: Vec<(&str, Style)> = out
             .spans
@@ -88,6 +82,9 @@ mod tests {
     #[test]
     fn no_match_returns_line_unchanged() {
         let line = Line::from("abc");
-        assert_eq!(highlight_line(line.clone(), "z", match_style(true)), line);
+        assert_eq!(
+            highlight_line(line.clone(), "z", Theme::colored().matched),
+            line
+        );
     }
 }

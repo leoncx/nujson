@@ -6,7 +6,7 @@ use serde_json::Value;
 
 const INDENT: &str = "  ";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub key: Style,
     pub string: Style,
@@ -14,6 +14,8 @@ pub struct Theme {
     pub boolean: Style,
     pub null: Style,
     pub punct: Style,
+    /// Text-filter matches.
+    pub matched: Style,
 }
 
 impl Theme {
@@ -26,6 +28,7 @@ impl Theme {
             boolean: Style::new().fg(Color::Yellow),
             null: Style::new().fg(Color::Magenta),
             punct: Style::new(),
+            matched: Style::new().bg(Color::Yellow).fg(Color::Black),
         }
     }
 
@@ -38,14 +41,7 @@ impl Theme {
             boolean: s,
             null: s,
             punct: s,
-        }
-    }
-
-    pub fn for_color(color: bool) -> Self {
-        if color {
-            Self::colored()
-        } else {
-            Self::plain()
+            matched: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         }
     }
 }

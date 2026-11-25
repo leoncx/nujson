@@ -20,6 +20,7 @@ nujson app.ndjson
 nujson app.ndjson -f '.level == "error"'   # start with a jq filter
 nujson -F app.ndjson                        # follow a growing file (tail -f)
 kubectl logs -f my-pod | nujson             # read from stdin, streamed
+nujson app.ndjson -v '.ts + " " + .msg'     # start with a jq view
 nujson --no-color app.ndjson                # or set NO_COLOR=1
 ```
 
@@ -50,6 +51,27 @@ truncation) is reloaded. Lines that are not valid JSON are marked with `✗`.
 
 jq filter examples: `.level == "error"`, `.code >= 500`, `select(.user.id == 42)`,
 `.msg | test("^conn")`, `has("trace_id")`. The jq dialect is [jaq](https://github.com/01mf02/jaq).
+
+## Config
+
+Optional, in `~/.config/nujson/config.toml` (`$XDG_CONFIG_HOME` is honored;
+`%APPDATA%\nujson\config.toml` on Windows), or the file given by `--config`
+or `$NUJSON_CONFIG`. Command-line options take precedence.
+
+```toml
+color = true                  # JSON syntax highlighting
+wrap = true                   # wrap long lines in the detail pane
+list_width = 40               # width of the line list, % of the screen (10-90)
+view = '.ts + " " + .msg'     # default jq view
+
+[theme]                       # color names, "#rrggbb" or 0-255
+key = "blue"
+string = "green"
+number = "cyan"
+boolean = "yellow"
+null = "magenta"
+match = "yellow"              # background of text-filter matches
+```
 
 ## Build
 

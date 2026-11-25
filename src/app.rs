@@ -13,7 +13,7 @@ use crate::clipboard::Clipboard;
 use crate::filter::{FilterKind, Job, JobResult, Matcher, Spec};
 use crate::projection::Projection;
 use crate::prompt::{Outcome, Prompt, PromptKind};
-use crate::render::highlight::{highlight_line, match_style};
+use crate::render::highlight::highlight_line;
 use crate::render::pretty::{Theme, pretty};
 use crate::source::{Source, View};
 use crate::ui;
@@ -53,7 +53,11 @@ pub struct App {
     pub path: PathBuf,
     pub source: Arc<Source>,
     pub color: bool,
+    /// Colored theme (from the config file).
+    pub theme: Theme,
     pub wrap: bool,
+    /// List pane width in % of the screen.
+    pub list_width: u16,
     pub focus: Focus,
     /// Line indices currently shown in the list (all lines, or filter matches).
     pub visible: Vec<usize>,
@@ -107,7 +111,9 @@ impl App {
             path,
             source,
             color,
+            theme: Theme::colored(),
             wrap: true,
+            list_width: 40,
             focus: Focus::List,
             visible,
             selected: 0,
@@ -132,6 +138,16 @@ impl App {
             validity,
             detail_cache: None,
             should_quit: false,
+        }
+    }
+
+    /// Theme for JSON rendering: the configured one, or plain when colors
+    /// are off.
+    pub fn active_theme(&self) -> Theme {
+        if self.color {
+            self.theme
+        } else {
+            Theme::plain()
         }
     }
 
@@ -228,7 +244,7 @@ impl App {
             Some(c) if c.line == i && c.color == self.color
                 && c.highlight == highlight && c.view == view_code);
         if !fresh {
-            let theme = Theme::for_color(self.color);
+            let theme = self.active_theme();
             let projected = {
                 let view = self.source.read();
                 self.view
@@ -236,9 +252,9 @@ impl App {
                     .and_then(|p| p.render(view.raw(i), &theme))
             };
             let mut lines =
-                projected.unwrap_or_else(|| render_detail(&self.source.read(), i, self.color));
+                projected.unwrap_or_else(|| render_detail(&self.source.read(), i, &theme));
             if let Some(q) = &highlight {
-                let hl = match_style(self.color);
+                let hl = theme.matched;
                 lines = lines
                     .into_iter()
                     .map(|l| highlight_line(l, q, hl))
@@ -554,7 +570,7 @@ impl App {
     }
 }
 
-fn render_detail(source: &View, i: usize, color: bool) -> Vec<Line<'static>> {
+fn render_detail(source: &View, i: usize, theme: &Theme) -> Vec<Line<'static>> {
     use ratatui::style::{Color, Modifier, Style};
 
     let raw = source.raw(i);
@@ -565,7 +581,7 @@ fn render_detail(source: &View, i: usize, color: bool) -> Vec<Line<'static>> {
         )];
     }
     match serde_json::from_slice::<serde_json::Value>(raw) {
-        Ok(value) => pretty(&value, &Theme::for_color(color)),
+        Ok(value) => pretty(&value, theme),
         Err(err) => {
             let err_style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
             vec![
@@ -745,7 +761,7 @@ mod tests {
         let mut a = app_with_lines(3);
         a.text_now("\"i\"");
         let spans = &a.detail_lines(0)[1].spans;
-        let hl = match_style(true);
+        let hl = Theme::colored().matched;
         assert!(
             spans
                 .iter()

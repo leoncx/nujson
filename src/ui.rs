@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Status, Validity};
 use crate::prompt::Prompt;
-use crate::render::highlight::{highlight_line, match_style};
+use crate::render::highlight::highlight_line;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // The footer grows by one line to show a prompt error.
@@ -16,8 +16,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     };
     let [main, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(footer_height)])
         .areas(frame.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(main);
+    let [left, right] = Layout::horizontal([
+        Constraint::Percentage(app.list_width),
+        Constraint::Percentage(100 - app.list_width),
+    ])
+    .areas(main);
 
     draw_list(frame, app, left);
     draw_detail(frame, app, right);
@@ -144,7 +147,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let preview_width = (inner.width as usize).saturating_sub(num_width + 3);
 
     let highlight = app.highlight_query().map(str::to_string);
-    let hl = match_style(app.color);
+    let hl = app.active_theme().matched;
 
     let end = (app.list_offset + height).min(app.visible.len());
     let mut rows = Vec::with_capacity(end - app.list_offset);

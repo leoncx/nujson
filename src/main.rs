@@ -1,5 +1,6 @@
 mod app;
 mod clipboard;
+mod config;
 mod filter;
 mod projection;
 mod prompt;
@@ -15,6 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 
 use crate::app::App;
+use crate::config::Config;
 use crate::filter::{FilterKind, Spec};
 use crate::source::{Source, Stream, spawn_reader};
 
@@ -38,16 +40,36 @@ struct Cli {
     /// to the last line while it is on it.
     #[arg(short = 'F', long)]
     follow: bool,
+
+    /// jq expression shown instead of each line, in the list and the detail
+    /// pane (e.g. '.ts + " " + .msg'); overrides `view` from the config.
+    #[arg(short, long, value_name = "EXPR")]
+    view: Option<String>,
+
+    /// Config file [default: $NUJSON_CONFIG, ~/.config/nujson/config.toml,
+    /// or %APPDATA%\nujson\config.toml on Windows]
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let color = !cli.no_color && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+    let config = Config::load(cli.config.as_deref())?;
+    let color = !cli.no_color
+        && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+        && config.color.unwrap_or(true);
 
     let (name, source) = load(cli.file, cli.follow)?;
     let mut app = App::new(name, source, color);
     app.follow = cli.follow;
+    app.theme = config.theme()?;
+    app.wrap = config.wrap.unwrap_or(true);
+    app.list_width = config.list_width.unwrap_or(40);
+    if let Some(view) = cli.view.or(config.view) {
+        app.set_view(&view)
+            .map_err(|e| anyhow!("invalid view {view:?}: {e}"))?;
+    }
     if let Some(expr) = cli.filter {
         app.start_filter(Spec::new(FilterKind::Jq, expr))
             .map_err(|e| anyhow!("invalid --filter: {e}"))?;
