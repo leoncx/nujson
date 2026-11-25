@@ -2,6 +2,7 @@
 name = "nujson"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "Terminal viewer for NDJSON files, with highlighting and text/jq filters"
 keywords = ["ndjson", "json", "jq", "tui", "viewer"]
 categories = ["command-line-utilities"]

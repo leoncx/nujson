@@ -54,3 +54,7 @@ cargo test
 
 Pushing a `v*` tag builds release archives for Linux (x86_64/aarch64, static
 musl), macOS (x86_64/arm64) and Windows (x86_64) via GitHub Actions.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
