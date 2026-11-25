@@ -8,11 +8,11 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 
 use ratatui::text::Line;
 
-use crate::filter::{FilterKind, Job, JobResult, Spec};
+use crate::filter::{FilterKind, Job, JobResult, Matcher, Spec};
 use crate::prompt::{Outcome, Prompt};
 use crate::render::highlight::{highlight_line, match_style};
 use crate::render::pretty::{Theme, pretty};
-use crate::source::Source;
+use crate::source::{Source, View};
 use crate::ui;
 
 /// Parse state of a line, computed lazily and cached.
@@ -68,16 +68,27 @@ pub struct App {
     pub show_help: bool,
     /// Open input prompt; while set, it receives all keys.
     pub prompt: Option<Prompt>,
+    /// Matcher of `filter`, applied to lines appended while streaming.
+    matcher: Option<Box<dyn Matcher>>,
+    /// Number of source lines the app has taken into account.
+    pub total: usize,
+    /// Source generation seen last; a change means the data was replaced.
+    generation: u64,
+    /// Follow mode: stick to the last line as new lines arrive (when the
+    /// selection is on the last line).
+    pub follow: bool,
     validity: Vec<Validity>,
     detail_cache: Option<DetailCache>,
     should_quit: bool,
 }
 
 impl App {
-    pub fn new(path: PathBuf, source: Source, color: bool) -> Self {
-        let source = Arc::new(source);
-        let visible = (0..source.len()).collect();
-        let validity = vec![Validity::Unknown; source.len()];
+    pub fn new(path: PathBuf, source: impl Into<Arc<Source>>, color: bool) -> Self {
+        let source = source.into();
+        let total = source.len();
+        let generation = source.generation();
+        let visible = (0..total).collect();
+        let validity = vec![Validity::Unknown; total];
         Self {
             path,
             source,
@@ -97,9 +108,67 @@ impl App {
             status: None,
             show_help: false,
             prompt: None,
+            matcher: None,
+            total,
+            generation,
+            follow: false,
             validity,
             detail_cache: None,
             should_quit: false,
+        }
+    }
+
+    /// Whether more data may still arrive (stdin being read, followed file).
+    pub fn is_live(&self) -> bool {
+        !self.source.is_complete()
+    }
+
+    /// Take into account lines appended to the source since the last call,
+    /// or start over if the data was replaced.
+    pub fn sync_source(&mut self) {
+        let generation = self.source.generation();
+        if generation != self.generation {
+            self.generation = generation;
+            self.job = None;
+            self.total = 0;
+            self.visible.clear();
+            self.validity.clear();
+            self.selected = 0;
+            self.list_offset = 0;
+            self.detail_cache = None;
+            self.status = Some("file was truncated; reloaded".into());
+        }
+        if let Some(e) = self.source.error() {
+            self.status = Some(e);
+        }
+        let len = self.source.len();
+        if len <= self.total {
+            return;
+        }
+        let at_end = if self.visible.is_empty() {
+            self.follow
+        } else {
+            self.selected + 1 == self.visible.len()
+        };
+        self.validity.resize(len, Validity::Unknown);
+        // While a job runs, the shown (old) filter keeps applying; the job's
+        // result is completed with the lines it did not see in finish_job.
+        let added = self.matching(self.total..len);
+        self.visible.extend(added);
+        self.total = len;
+        if at_end && self.follow && !self.visible.is_empty() {
+            self.select(self.visible.len() - 1);
+        }
+    }
+
+    /// Lines of `range` accepted by the active filter (all without filter).
+    fn matching(&self, range: std::ops::Range<usize>) -> Vec<usize> {
+        match &self.matcher {
+            None => range.collect(),
+            Some(m) => {
+                let view = self.source.read();
+                range.filter(|&i| m.matches(view.raw(i))).collect()
+            }
         }
     }
 
@@ -111,7 +180,8 @@ impl App {
     /// Whether line `i` is valid JSON (cached; does not build a `Value`).
     pub fn validity(&mut self, i: usize) -> Validity {
         if self.validity[i] == Validity::Unknown {
-            let raw = self.source.raw(i);
+            let view = self.source.read();
+            let raw = view.raw(i);
             self.validity[i] = if raw.iter().all(u8::is_ascii_whitespace) {
                 Validity::Blank
             } else if serde_json::from_slice::<serde::de::IgnoredAny>(raw).is_ok() {
@@ -138,7 +208,7 @@ impl App {
         let fresh = matches!(&self.detail_cache,
             Some(c) if c.line == i && c.color == self.color && c.highlight == highlight);
         if !fresh {
-            let mut lines = render_detail(&self.source, i, self.color);
+            let mut lines = render_detail(&self.source.read(), i, self.color);
             if let Some(q) = &highlight {
                 let hl = match_style(self.color);
                 lines = lines
@@ -158,10 +228,13 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.should_quit {
+            self.sync_source();
             terminal.draw(|frame| ui::draw(frame, self))?;
-            // While a filter runs, wake up regularly to show progress.
+            // While a filter runs or data streams in, wake up regularly.
             let ready = if self.job.is_some() {
                 event::poll(Duration::from_millis(50))?
+            } else if self.is_live() {
+                event::poll(Duration::from_millis(100))?
             } else {
                 true
             };
@@ -289,7 +362,7 @@ impl App {
             self.clear_filter();
             return Ok(());
         }
-        let job = Job::spawn(Arc::clone(&self.source), spec)?;
+        let job = Job::spawn(Arc::clone(&self.source), self.total, spec)?;
         self.job = Some(job);
         Ok(())
     }
@@ -315,8 +388,11 @@ impl App {
     fn finish_job(&mut self, result: JobResult) {
         let Some(job) = self.job.take() else { return };
         match result {
-            Ok(lines) => {
+            Ok(mut lines) => {
+                self.matcher = job.spec.matcher().ok();
                 self.filter = Some(job.spec.clone());
+                // Lines appended while the job ran.
+                lines.extend(self.matching(job.total..self.total));
                 self.set_visible(lines);
             }
             Err(e) => {
@@ -335,7 +411,8 @@ impl App {
     pub fn clear_filter(&mut self) {
         self.job = None;
         self.filter = None;
-        self.set_visible((0..self.source.len()).collect());
+        self.matcher = None;
+        self.set_visible((0..self.total).collect());
     }
 
     /// Replace the visible lines, keeping the selection on the same original
@@ -367,7 +444,7 @@ impl App {
     }
 }
 
-fn render_detail(source: &Source, i: usize, color: bool) -> Vec<Line<'static>> {
+fn render_detail(source: &View, i: usize, color: bool) -> Vec<Line<'static>> {
     use ratatui::style::{Color, Modifier, Style};
 
     let raw = source.raw(i);
@@ -574,6 +651,77 @@ mod tests {
                 .iter()
                 .all(|s| s.style.bg.is_none())
         );
+    }
+
+    fn streaming_app(follow: bool) -> (App, Arc<Source>) {
+        let src = Arc::new(Source::streaming());
+        let mut a = App::new(PathBuf::from("stdin"), Arc::clone(&src), true);
+        a.follow = follow;
+        (a, src)
+    }
+
+    fn line(i: usize) -> String {
+        format!("{{\"i\":{i}}}\n")
+    }
+
+    #[test]
+    fn streamed_lines_are_added_and_filtered() {
+        let (mut a, src) = streaming_app(false);
+        assert!(a.is_live());
+        src.append(line(0).as_bytes());
+        a.sync_source();
+        assert_eq!(a.visible, vec![0]);
+
+        a.text_now("1");
+        src.append((line(1) + &line(2) + &line(11)).as_bytes());
+        a.sync_source();
+        assert_eq!(a.visible, vec![1, 3], "new lines go through the filter");
+        assert_eq!(a.selected_line(), Some(1), "no follow: selection stays");
+
+        a.clear_filter();
+        assert_eq!(a.visible, vec![0, 1, 2, 3]);
+        src.finish();
+        assert!(!a.is_live());
+    }
+
+    #[test]
+    fn lines_appended_during_a_job_are_filtered_when_it_ends() {
+        let (mut a, src) = streaming_app(false);
+        src.append((line(1) + &line(2)).as_bytes());
+        a.sync_source();
+        a.start_filter(Spec::new(FilterKind::Text, "1")).unwrap();
+        src.append((line(10) + &line(3)).as_bytes());
+        a.sync_source(); // job still pending or done: either way no loss
+        a.wait_job();
+        assert_eq!(a.visible, vec![0, 2]);
+    }
+
+    #[test]
+    fn follow_sticks_to_last_line_only_when_on_it() {
+        let (mut a, src) = streaming_app(true);
+        src.append((line(0) + &line(1)).as_bytes());
+        a.sync_source();
+        assert_eq!(a.selected_line(), Some(1), "starts at the end");
+        src.append(line(2).as_bytes());
+        a.sync_source();
+        assert_eq!(a.selected_line(), Some(2));
+        press(&mut a, KeyCode::Up);
+        src.append(line(3).as_bytes());
+        a.sync_source();
+        assert_eq!(a.selected_line(), Some(1), "moved away: stays put");
+    }
+
+    #[test]
+    fn reset_source_restarts_app_state() {
+        let (mut a, src) = streaming_app(true);
+        src.append((line(0) + &line(1)).as_bytes());
+        a.sync_source();
+        src.reset();
+        src.append(line(7).as_bytes());
+        a.sync_source();
+        assert_eq!(a.total, 1);
+        assert_eq!(a.visible, vec![0]);
+        assert!(a.status.as_deref().unwrap().contains("truncated"));
     }
 
     #[test]

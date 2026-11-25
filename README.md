@@ -18,12 +18,16 @@ jq filters. Runs on Linux, macOS and Windows.
 ```sh
 nujson app.ndjson
 nujson app.ndjson -f '.level == "error"'   # start with a jq filter
-kubectl logs my-pod | nujson                # read from stdin
+nujson -F app.ndjson                        # follow a growing file (tail -f)
+kubectl logs -f my-pod | nujson             # read from stdin, streamed
 nujson --no-color app.ndjson                # or set NO_COLOR=1
 ```
 
 Large files are memory-mapped and filters run on all cores in the background.
-Lines that are not valid JSON are marked with `✗`.
+Piped input and followed files are shown as lines arrive; filters also apply to
+new lines. In follow mode the selection sticks to the last line while it is on
+it (press `G` to go back there). A followed file that shrinks (log rotation by
+truncation) is reloaded. Lines that are not valid JSON are marked with `✗`.
 
 ## Keys
 

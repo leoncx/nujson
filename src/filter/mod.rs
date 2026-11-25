@@ -73,17 +73,17 @@ pub struct Job {
 
 impl Job {
     /// Compile `spec` on the caller's thread, so errors are reported
-    /// immediately, then start filtering.
-    pub fn spawn(source: Arc<Source>, spec: Spec) -> Result<Self, String> {
+    /// immediately, then start filtering the first `total` lines; lines
+    /// appended later are the caller's business.
+    pub fn spawn(source: Arc<Source>, total: usize, spec: Spec) -> Result<Self, String> {
         spec.matcher()?;
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicUsize::new(0));
-        let total = source.len();
         {
             let (spec, cancel, done) = (spec.clone(), Arc::clone(&cancel), Arc::clone(&done));
             thread::spawn(move || {
-                let result = run_parallel(&source, &spec, &cancel, &done);
+                let result = run_parallel(&source, total, &spec, &cancel, &done);
                 if !cancel.load(Ordering::Relaxed) {
                     let _ = tx.send(result);
                 }
@@ -131,11 +131,11 @@ impl Drop for Job {
 /// builds its own matcher (jaq values are not thread-safe).
 fn run_parallel(
     source: &Source,
+    total: usize,
     spec: &Spec,
     cancel: &AtomicBool,
     done: &AtomicUsize,
 ) -> JobResult {
-    let total = source.len();
     let n_chunks = total.div_ceil(CHUNK);
     let workers = thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -156,9 +156,16 @@ fn run_parallel(
                         }
                         let start = chunk * CHUNK;
                         let end = (start + CHUNK).min(total);
+                        // One read lock per chunk, so streamed appends are
+                        // not blocked for long.
+                        let view = source.read();
+                        if end > view.len() {
+                            break; // data was reset (followed file truncated)
+                        }
                         let hits = (start..end)
-                            .filter(|&i| matcher.matches(source.raw(i)))
+                            .filter(|&i| matcher.matches(view.raw(i)))
                             .collect();
+                        drop(view);
                         parts.push((chunk, hits));
                         done.fetch_add(end - start, Ordering::Relaxed);
                     }
@@ -195,7 +202,8 @@ mod tests {
         // Several chunks, so results from different workers must be merged
         // back in order.
         let src = source(CHUNK * 2 + 5);
-        let mut job = Job::spawn(src, Spec::new(FilterKind::Jq, ".i % 1000 == 0")).unwrap();
+        let n = src.len();
+        let mut job = Job::spawn(src, n, Spec::new(FilterKind::Jq, ".i % 1000 == 0")).unwrap();
         let lines = job.wait().unwrap();
         assert_eq!(lines, (0..=16000).step_by(1000).collect::<Vec<_>>());
         assert_eq!(job.percent(), 100);
@@ -203,12 +211,12 @@ mod tests {
 
     #[test]
     fn invalid_jq_fails_at_spawn() {
-        assert!(Job::spawn(source(1), Spec::new(FilterKind::Jq, ".[")).is_err());
+        assert!(Job::spawn(source(1), 1, Spec::new(FilterKind::Jq, ".[")).is_err());
     }
 
     #[test]
     fn empty_source() {
-        let mut job = Job::spawn(source(0), Spec::new(FilterKind::Text, "x")).unwrap();
+        let mut job = Job::spawn(source(0), 0, Spec::new(FilterKind::Text, "x")).unwrap();
         assert!(job.wait().unwrap().is_empty());
         assert_eq!(job.percent(), 100);
     }

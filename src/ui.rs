@@ -84,12 +84,19 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let live = if !app.is_live() {
+        ""
+    } else if app.follow {
+        " · following"
+    } else {
+        " · reading…"
+    };
     let title = match &app.filter {
-        None => format!(" {file_name} · {} lines ", app.source.len()),
+        None => format!(" {file_name} · {} lines{live} ", app.total),
         Some(_) => format!(
-            " {file_name} · {} / {} ",
+            " {file_name} · {} / {}{live} ",
             app.visible.len(),
-            app.source.len()
+            app.total
         ),
     };
     let mut block = pane(title, app.focus == Focus::List);
@@ -130,7 +137,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         app.list_offset = app.selected + 1 - height;
     }
 
-    let num_width = app.source.len().to_string().len();
+    let num_width = app.total.to_string().len();
     // "▶" + "✗" + number + " "
     let preview_width = (inner.width as usize).saturating_sub(num_width + 3);
 
@@ -148,6 +155,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         let preview: String = app
             .source
+            .read()
             .line(line)
             .chars()
             .take(preview_width)
