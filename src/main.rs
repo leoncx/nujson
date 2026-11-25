@@ -1,4 +1,5 @@
 mod app;
+mod source;
 mod ui;
 
 use std::path::PathBuf;
@@ -7,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use crate::app::App;
+use crate::source::Source;
 
 /// Terminal viewer for NDJSON files.
 #[derive(Debug, Parser)]
@@ -28,7 +30,8 @@ fn main() -> Result<()> {
     }
     let color = !cli.no_color && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
 
-    let mut app = App::new(cli.file, color);
+    let source = Source::open(&cli.file)?;
+    let mut app = App::new(cli.file, source, color);
 
     // `ratatui::init` enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before printing the panic message.

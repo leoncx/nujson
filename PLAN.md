@@ -53,7 +53,7 @@ src/
 ## Milestones
 
 - [x] **M1 Skeleton** — cargo project, clap, terminal setup/restore (incl. panic), CI matrix (ubuntu/macos/windows: fmt, clippy, test).
-- [ ] **M2 Viewer** — mmap + line index, left list, right raw view, navigation & scrolling.
+- [x] **M2 Viewer** — mmap + line index, left list, right raw view, navigation & scrolling.
 - [ ] **M3 Pretty + highlight** — renderer, theme, `c` toggle, `--no-color`, `NO_COLOR` env.
 - [ ] **M4 Text search/filter** — input prompt, smart-case substring, match count, `n/N`.
 - [ ] **M5 jq filter** — jaq, compile errors in prompt, background eval with progress.
