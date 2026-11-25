@@ -8,8 +8,13 @@ use crate::app::{App, Focus, Validity};
 use crate::prompt::Prompt;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [main, footer] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    // The footer grows by one line to show a prompt error.
+    let footer_height = match &app.prompt {
+        Some(p) if p.error.is_some() => 2,
+        _ => 1,
+    };
+    let [main, footer] = Layout::vertical([Constraint::Min(1), Constraint::Length(footer_height)])
+        .areas(frame.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(main);
 
@@ -33,11 +38,20 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         ),
     };
     let mut block = pane(title, app.focus == Focus::List);
-    if let Some(q) = &app.filter {
-        block = block.title_bottom(Line::styled(
-            format!(" /{q} "),
-            Style::new().fg(Color::Yellow),
-        ));
+    let bottom = if let Some(job) = &app.job {
+        Some(format!(
+            " {}{} … {}% ",
+            job.spec.kind.symbol(),
+            job.spec.query,
+            job.percent()
+        ))
+    } else {
+        app.filter
+            .as_ref()
+            .map(|f| format!(" {}{} ", f.kind.symbol(), f.query))
+    };
+    if let Some(text) = bottom {
+        block = block.title_bottom(Line::styled(text, Style::new().fg(Color::Yellow)));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -125,7 +139,25 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(prompt) = &app.prompt {
+        let area = if let Some(err) = &prompt.error {
+            let [err_area, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+            frame.render_widget(
+                Paragraph::new(format!("✗ {err}")).style(Style::new().fg(Color::Red)),
+                err_area,
+            );
+            rest
+        } else {
+            area
+        };
         draw_prompt(frame, prompt, area);
+        return;
+    }
+    if let Some(msg) = &app.status {
+        frame.render_widget(
+            Paragraph::new(format!("✗ {msg}")).style(Style::new().fg(Color::Red)),
+            area,
+        );
         return;
     }
     let on_off = |b: bool| if b { "on" } else { "off" };
@@ -139,8 +171,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
     key("↑↓", "move".into());
     key("Tab", "focus".into());
-    key("/", "filter".into());
-    if app.filter.is_some() {
+    key("/", "text".into());
+    key("|", "jq".into());
+    if app.job.is_some() {
+        key("Esc", "cancel".into());
+    } else if app.filter.is_some() {
         key("Esc", "clear".into());
     }
     if app.focus == Focus::Detail && !app.wrap {
@@ -186,6 +221,7 @@ fn dim() -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::{FilterKind, Spec};
     use crate::source::Source;
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::Path;
@@ -227,14 +263,14 @@ mod tests {
     #[test]
     fn filter_title_prompt_and_no_match() {
         let mut app = fixture_app();
-        app.apply_text_filter("error");
+        app.text_now("error");
         let screen = render(&mut app, 80, 8);
         assert!(screen.contains("sample.ndjson · 1 / 5"), "{screen}");
         assert!(screen.contains("└ /error "), "{screen}");
         assert!(screen.contains("▶ 3 "), "{screen}");
         assert!(screen.contains("Esc clear"), "{screen}");
 
-        app.prompt = Some(Prompt::new(crate::prompt::PromptKind::Text, "warn"));
+        app.prompt = Some(Prompt::new(crate::filter::FilterKind::Text, "warn"));
         let screen = render(&mut app, 80, 8);
         assert!(
             screen.lines().last().unwrap().starts_with("/warn"),
@@ -242,10 +278,30 @@ mod tests {
         );
 
         app.prompt = None;
-        app.apply_text_filter("nothing-matches-this");
+        app.text_now("nothing-matches-this");
         let screen = render(&mut app, 80, 8);
         assert!(screen.contains("(no match — Esc to clear)"), "{screen}");
         assert!(screen.contains(" Detail "), "{screen}");
+    }
+
+    #[test]
+    fn jq_filter_and_prompt_error_rendering() {
+        let mut app = fixture_app();
+        app.start_filter(Spec::new(FilterKind::Jq, ".code >= 500"))
+            .unwrap();
+        let screen = render(&mut app, 80, 8);
+        assert!(screen.contains("|.code >= 500 …"), "running: {screen}");
+        app.wait_job();
+        let screen = render(&mut app, 80, 8);
+        assert!(screen.contains("1 / 5"), "{screen}");
+        assert!(screen.contains("└ |.code >= 500 "), "{screen}");
+
+        let mut p = Prompt::new(FilterKind::Jq, ".[");
+        p.error = Some("expected term".into());
+        app.prompt = Some(p);
+        let screen = render(&mut app, 80, 8);
+        let last: Vec<&str> = screen.lines().rev().take(2).collect();
+        assert_eq!(last, ["|.[", "✗ expected term"], "{screen}");
     }
 
     #[test]

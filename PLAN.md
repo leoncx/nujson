@@ -9,7 +9,7 @@ Terminal viewer for NDJSON files (see `SPEC.md`).
 | TUI | `ratatui` (re-exported `crossterm` backend) | De-facto standard; crossterm is cross-platform (Linux/macOS/Windows) |
 | JSON | `serde_json` (`preserve_order`) | Keep key order as in the file |
 | jq-like | `jaq-core` + `jaq-std` + `jaq-json` | Pure-Rust jq clone, no C deps → easy Windows build |
-| CLI | `clap` (derive) | `nujson file.ndjson [--no-color] [--filter EXPR]` |
+| CLI | `clap` (derive) | `nujson file.ndjson [--no-color] [-f/--filter EXPR]` |
 | Big files | `memmap2` | Index line offsets, parse lazily |
 | Errors | `anyhow` | |
 | Tests | `insta` + ratatui `TestBackend` | Snapshot UI tests |
@@ -57,7 +57,7 @@ src/
 - [x] **M2 Viewer** — mmap + line index, left list, right raw view, navigation & scrolling.
 - [x] **M3 Pretty + highlight** — renderer, theme, `c` toggle, `--no-color`, `NO_COLOR` env.
 - [x] **M4 Text filter** — `/` prompt, smart-case substring, match count, Esc clears (selection kept). `n/N` dropped: the list is already filtered.
-- [ ] **M5 jq filter** — jaq, compile errors in prompt, background eval with progress.
+- [x] **M5 jq filter** — `|` prompt and `-f/--filter EXPR`, jaq 3, compile errors shown above the prompt, filters run on all cores in the background with progress; Esc cancels.
 - [ ] **M6 Polish** — help popup, match highlighting in detail, stdin input, release binaries (`cargo-dist`).
 - [ ] **M7 Later** — follow mode (`-f`), copy to clipboard, jq projection of detail view, config file.
 

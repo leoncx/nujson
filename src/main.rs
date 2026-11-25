@@ -7,10 +7,11 @@ mod ui;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 
 use crate::app::App;
+use crate::filter::{FilterKind, Spec};
 use crate::source::Source;
 
 /// Terminal viewer for NDJSON files.
@@ -23,6 +24,11 @@ struct Cli {
     /// Disable JSON syntax highlighting (also honored via the NO_COLOR env var).
     #[arg(long)]
     no_color: bool,
+
+    /// jq expression applied at startup; only lines where it yields a value
+    /// other than false/null are listed (e.g. '.level == "error"').
+    #[arg(short, long, value_name = "EXPR")]
+    filter: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -35,6 +41,10 @@ fn main() -> Result<()> {
 
     let source = Source::open(&cli.file)?;
     let mut app = App::new(cli.file, source, color);
+    if let Some(expr) = cli.filter {
+        app.start_filter(Spec::new(FilterKind::Jq, expr))
+            .map_err(|e| anyhow!("invalid --filter: {e}"))?;
+    }
 
     // `ratatui::init` enters raw mode + alternate screen and installs a panic
     // hook that restores the terminal before printing the panic message.

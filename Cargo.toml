@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.105"
 clap = { version = "4.6.10", features = ["derive"] }
+jaq-core = "3.1.2"
+jaq-json = "2.0.3"
+jaq-std = "3.0.4"
 memchr = "2.8.3"
 memmap2 = "0.9.12"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }

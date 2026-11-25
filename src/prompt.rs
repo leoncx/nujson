@@ -2,19 +2,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptKind {
-    /// Plain-text filter (`/`).
-    Text,
-}
-
-impl PromptKind {
-    pub fn symbol(self) -> &'static str {
-        match self {
-            PromptKind::Text => "/",
-        }
-    }
-}
+use crate::filter::FilterKind;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -25,16 +13,19 @@ pub enum Outcome {
 
 #[derive(Debug)]
 pub struct Prompt {
-    pub kind: PromptKind,
+    pub kind: FilterKind,
     pub text: String,
+    /// Error from the last submit (e.g. invalid jq); cleared on edit.
+    pub error: Option<String>,
     /// Cursor position as a byte index into `text` (always on a char boundary).
     pub cursor: usize,
 }
 
 impl Prompt {
-    pub fn new(kind: PromptKind, initial: &str) -> Self {
+    pub fn new(kind: FilterKind, initial: &str) -> Self {
         Self {
             kind,
+            error: None,
             text: initial.to_string(),
             cursor: initial.len(),
         }
@@ -47,6 +38,9 @@ impl Prompt {
 
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Outcome {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
+        if !matches!(code, KeyCode::Enter | KeyCode::Esc) {
+            self.error = None;
+        }
         match code {
             KeyCode::Enter => return Outcome::Submit,
             KeyCode::Esc => return Outcome::Cancel,
@@ -99,7 +93,7 @@ mod tests {
 
     #[test]
     fn edit_with_unicode_and_cursor_moves() {
-        let mut p = Prompt::new(PromptKind::Text, "");
+        let mut p = Prompt::new(FilterKind::Text, "");
         typed(&mut p, "été");
         assert_eq!(p.cursor_col(), 3);
         p.on_key(KeyCode::Left, KeyModifiers::NONE);
@@ -115,7 +109,7 @@ mod tests {
 
     #[test]
     fn ctrl_u_clears_before_cursor_and_outcomes() {
-        let mut p = Prompt::new(PromptKind::Text, "abc");
+        let mut p = Prompt::new(FilterKind::Text, "abc");
         p.on_key(KeyCode::Left, KeyModifiers::NONE);
         p.on_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert_eq!(p.text, "c");

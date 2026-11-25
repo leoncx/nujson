@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::DefaultTerminal;
@@ -6,8 +8,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 
 use ratatui::text::Line;
 
-use crate::filter::{self, text::TextMatcher};
-use crate::prompt::{Outcome, Prompt, PromptKind};
+use crate::filter::{FilterKind, Job, JobResult, Spec};
+use crate::prompt::{Outcome, Prompt};
 use crate::render::pretty::{Theme, pretty};
 use crate::source::Source;
 use crate::ui;
@@ -37,7 +39,7 @@ pub enum Focus {
 
 pub struct App {
     pub path: PathBuf,
-    pub source: Source,
+    pub source: Arc<Source>,
     pub color: bool,
     pub wrap: bool,
     pub focus: Focus,
@@ -54,8 +56,12 @@ pub struct App {
     pub detail_height: usize,
     /// Max vertical scroll of the detail pane from the last draw.
     pub detail_max_scroll: u16,
-    /// Active text filter, if any.
-    pub filter: Option<String>,
+    /// Filter whose results are currently shown, if any.
+    pub filter: Option<Spec>,
+    /// Filter being computed in the background; replaces `filter` when done.
+    pub job: Option<Job>,
+    /// One-off error message shown in the footer until the next key press.
+    pub status: Option<String>,
     /// Open input prompt; while set, it receives all keys.
     pub prompt: Option<Prompt>,
     validity: Vec<Validity>,
@@ -65,6 +71,7 @@ pub struct App {
 
 impl App {
     pub fn new(path: PathBuf, source: Source, color: bool) -> Self {
+        let source = Arc::new(source);
         let visible = (0..source.len()).collect();
         let validity = vec![Validity::Unknown; source.len()];
         Self {
@@ -82,6 +89,8 @@ impl App {
             detail_height: 1,
             detail_max_scroll: 0,
             filter: None,
+            job: None,
+            status: None,
             prompt: None,
             validity,
             detail_cache: None,
@@ -127,17 +136,25 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.should_quit {
             terminal.draw(|frame| ui::draw(frame, self))?;
-            if let Event::Key(key) = event::read()? {
+            // While a filter runs, wake up regularly to show progress.
+            let ready = if self.job.is_some() {
+                event::poll(Duration::from_millis(50))?
+            } else {
+                true
+            };
+            if ready && let Event::Key(key) = event::read()? {
                 // Windows reports both press and release; only act on press.
                 if key.kind == KeyEventKind::Press {
                     self.on_key(key.code, key.modifiers);
                 }
             }
+            self.poll_job();
         }
         Ok(())
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        self.status = None;
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return;
@@ -147,21 +164,31 @@ impl App {
                 Outcome::Editing => {}
                 Outcome::Cancel => self.prompt = None,
                 Outcome::Submit => {
-                    let query = std::mem::take(&mut prompt.text);
-                    self.prompt = None;
-                    self.apply_text_filter(&query);
+                    // Surrounding spaces may matter in a text query, not in jq.
+                    let query = match prompt.kind {
+                        FilterKind::Text => prompt.text.as_str(),
+                        FilterKind::Jq => prompt.text.trim(),
+                    };
+                    let spec = Spec::new(prompt.kind, query);
+                    match self.start_filter(spec) {
+                        Ok(()) => self.prompt = None,
+                        Err(e) => {
+                            if let Some(p) = &mut self.prompt {
+                                p.error = Some(e);
+                            }
+                        }
+                    }
                 }
             }
             return;
         }
         match code {
             KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc if self.job.is_some() => self.job = None,
             KeyCode::Esc if self.filter.is_some() => self.clear_filter(),
             KeyCode::Esc => self.focus = Focus::List,
-            KeyCode::Char('/') => {
-                let initial = self.filter.as_deref().unwrap_or("");
-                self.prompt = Some(Prompt::new(PromptKind::Text, initial));
-            }
+            KeyCode::Char('/') => self.open_prompt(FilterKind::Text),
+            KeyCode::Char('|') => self.open_prompt(FilterKind::Jq),
             KeyCode::Char('c') => self.color = !self.color,
             KeyCode::Char('w') => {
                 self.wrap = !self.wrap;
@@ -217,19 +244,68 @@ impl App {
         }
     }
 
-    /// Filter the list to lines containing `query` (smart case). An empty
-    /// query clears the filter.
-    pub fn apply_text_filter(&mut self, query: &str) {
-        if query.is_empty() {
+    /// Open the input prompt, pre-filled with the active query of that kind
+    /// (or the one still running).
+    fn open_prompt(&mut self, kind: FilterKind) {
+        let current = self.job.as_ref().map(|j| &j.spec).or(self.filter.as_ref());
+        let initial = current
+            .filter(|s| s.kind == kind)
+            .map_or("", |s| s.query.as_str());
+        self.prompt = Some(Prompt::new(kind, initial));
+    }
+
+    /// Start filtering in the background, cancelling any running filter. An
+    /// empty query clears the filter. Fails on an invalid jq expression.
+    pub fn start_filter(&mut self, spec: Spec) -> Result<(), String> {
+        if spec.query.is_empty() {
             self.clear_filter();
-            return;
+            return Ok(());
         }
-        let visible = filter::run(&self.source, &TextMatcher::new(query));
-        self.filter = Some(query.to_string());
-        self.set_visible(visible);
+        let job = Job::spawn(Arc::clone(&self.source), spec)?;
+        self.job = Some(job);
+        Ok(())
+    }
+
+    /// Apply the result of the background filter if it has finished.
+    pub fn poll_job(&mut self) {
+        if let Some(job) = &mut self.job
+            && let Some(result) = job.poll()
+        {
+            self.finish_job(result);
+        }
+    }
+
+    /// Block until the running filter is done and apply it.
+    #[cfg(test)]
+    pub fn wait_job(&mut self) {
+        if let Some(job) = &mut self.job {
+            let result = job.wait();
+            self.finish_job(result);
+        }
+    }
+
+    fn finish_job(&mut self, result: JobResult) {
+        let Some(job) = self.job.take() else { return };
+        match result {
+            Ok(lines) => {
+                self.filter = Some(job.spec.clone());
+                self.set_visible(lines);
+            }
+            Err(e) => {
+                self.status = Some(format!("{}{}: {e}", job.spec.kind.symbol(), job.spec.query))
+            }
+        }
+    }
+
+    /// Run a text filter to completion (tests only).
+    #[cfg(test)]
+    pub fn text_now(&mut self, q: &str) {
+        self.start_filter(Spec::new(FilterKind::Text, q)).unwrap();
+        self.wait_job();
     }
 
     pub fn clear_filter(&mut self) {
+        self.job = None;
         self.filter = None;
         self.set_visible((0..self.source.len()).collect());
     }
@@ -348,7 +424,8 @@ mod tests {
         press(&mut a, KeyCode::Enter);
         assert!(a.prompt.is_none());
         assert!(!a.should_quit);
-        assert_eq!(a.filter.as_deref(), Some("i\":1"));
+        a.wait_job();
+        assert_eq!(a.filter, Some(Spec::new(FilterKind::Text, "i\":1")));
         assert_eq!(a.visible, vec![1, 10, 11]);
 
         press(&mut a, KeyCode::Down);
@@ -363,11 +440,11 @@ mod tests {
     fn filter_selects_next_match_after_previous_selection() {
         let mut a = app_with_lines(12);
         a.select(5);
-        a.apply_text_filter("1");
+        a.text_now("1");
         assert_eq!(a.visible, vec![1, 10, 11]);
         assert_eq!(a.selected_line(), Some(10));
         a.select(0);
-        a.apply_text_filter("1}");
+        a.text_now("1}");
         assert_eq!(a.visible, vec![1, 11]);
         assert_eq!(a.selected_line(), Some(1));
     }
@@ -375,11 +452,11 @@ mod tests {
     #[test]
     fn filter_with_no_match_and_empty_query() {
         let mut a = app_with_lines(3);
-        a.apply_text_filter("zzz");
+        a.text_now("zzz");
         assert!(a.visible.is_empty());
         assert_eq!(a.selected_line(), None);
         press(&mut a, KeyCode::Down);
-        a.apply_text_filter("");
+        a.text_now("");
         assert_eq!(a.filter, None);
         assert_eq!(a.visible.len(), 3);
     }
@@ -387,12 +464,55 @@ mod tests {
     #[test]
     fn prompt_is_prefilled_and_esc_cancels() {
         let mut a = app_with_lines(3);
-        a.apply_text_filter("1");
+        a.text_now("1");
         press(&mut a, KeyCode::Char('/'));
         assert_eq!(a.prompt.as_ref().unwrap().text, "1");
         press(&mut a, KeyCode::Esc);
         assert!(a.prompt.is_none());
-        assert_eq!(a.filter.as_deref(), Some("1"), "cancel keeps filter");
+        assert_eq!(a.filter.as_ref().unwrap().query, "1", "cancel keeps filter");
+        // The jq prompt is not pre-filled with a text query.
+        press(&mut a, KeyCode::Char('|'));
+        assert_eq!(a.prompt.as_ref().unwrap().text, "");
+    }
+
+    #[test]
+    fn jq_filter_via_prompt() {
+        let mut a = app_with_lines(12);
+        press(&mut a, KeyCode::Char('|'));
+        type_str(&mut a, ".i >= 10");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.prompt.is_none());
+        a.wait_job();
+        assert_eq!(a.visible, vec![10, 11]);
+        assert_eq!(a.filter.as_ref().unwrap().kind, FilterKind::Jq);
+    }
+
+    #[test]
+    fn invalid_jq_keeps_prompt_open_with_error() {
+        let mut a = app_with_lines(3);
+        a.text_now("1");
+        press(&mut a, KeyCode::Char('|'));
+        type_str(&mut a, ".i ==");
+        press(&mut a, KeyCode::Enter);
+        let p = a.prompt.as_ref().expect("prompt stays open");
+        assert!(p.error.as_deref().unwrap().contains("expected"));
+        assert!(a.job.is_none());
+        assert_eq!(a.visible, vec![1], "previous filter untouched");
+        // Editing clears the error.
+        press(&mut a, KeyCode::Char(' '));
+        assert!(a.prompt.as_ref().unwrap().error.is_none());
+    }
+
+    #[test]
+    fn esc_cancels_running_job_then_clears_filter() {
+        let mut a = app_with_lines(3);
+        a.text_now("1");
+        a.start_filter(Spec::new(FilterKind::Text, "2")).unwrap();
+        press(&mut a, KeyCode::Esc);
+        assert!(a.job.is_none());
+        assert_eq!(a.filter.as_ref().unwrap().query, "1");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.filter.is_none());
     }
 
     #[test]
