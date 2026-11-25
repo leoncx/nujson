@@ -1,6 +1,7 @@
 mod app;
 mod clipboard;
 mod filter;
+mod projection;
 mod prompt;
 mod render;
 mod source;

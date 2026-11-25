@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +11,8 @@ use ratatui::text::Line;
 
 use crate::clipboard::Clipboard;
 use crate::filter::{FilterKind, Job, JobResult, Matcher, Spec};
-use crate::prompt::{Outcome, Prompt};
+use crate::projection::Projection;
+use crate::prompt::{Outcome, Prompt, PromptKind};
 use crate::render::highlight::{highlight_line, match_style};
 use crate::render::pretty::{Theme, pretty};
 use crate::source::{Source, View};
@@ -31,6 +33,7 @@ pub struct DetailCache {
     pub line: usize,
     pub color: bool,
     pub highlight: Option<String>,
+    pub view: Option<String>,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -69,6 +72,9 @@ pub struct App {
     pub filter: Option<Spec>,
     /// Filter being computed in the background; replaces `filter` when done.
     pub job: Option<Job>,
+    /// jq view applied to every line for display.
+    pub view: Option<Projection>,
+    preview_cache: HashMap<usize, String>,
     /// One-off message shown in the footer until the next key press.
     pub status: Option<Status>,
     clipboard: Clipboard,
@@ -113,6 +119,8 @@ impl App {
             detail_max_scroll: 0,
             filter: None,
             job: None,
+            view: None,
+            preview_cache: HashMap::new(),
             status: None,
             clipboard: Clipboard::default(),
             show_help: false,
@@ -145,6 +153,7 @@ impl App {
             self.selected = 0;
             self.list_offset = 0;
             self.detail_cache = None;
+            self.preview_cache.clear();
             self.status = Some(Status::Info("file was truncated; reloaded".into()));
         }
         if let Some(e) = self.source.error() {
@@ -214,10 +223,20 @@ impl App {
     /// (line, color, highlight) and cached.
     pub fn detail_lines(&mut self, i: usize) -> &[Line<'static>] {
         let highlight = self.highlight_query().map(str::to_string);
+        let view_code = self.view.as_ref().map(|v| v.code.clone());
         let fresh = matches!(&self.detail_cache,
-            Some(c) if c.line == i && c.color == self.color && c.highlight == highlight);
+            Some(c) if c.line == i && c.color == self.color
+                && c.highlight == highlight && c.view == view_code);
         if !fresh {
-            let mut lines = render_detail(&self.source.read(), i, self.color);
+            let theme = Theme::for_color(self.color);
+            let projected = {
+                let view = self.source.read();
+                self.view
+                    .as_ref()
+                    .and_then(|p| p.render(view.raw(i), &theme))
+            };
+            let mut lines =
+                projected.unwrap_or_else(|| render_detail(&self.source.read(), i, self.color));
             if let Some(q) = &highlight {
                 let hl = match_style(self.color);
                 lines = lines
@@ -229,6 +248,7 @@ impl App {
                 line: i,
                 color: self.color,
                 highlight,
+                view: view_code,
                 lines,
             });
         }
@@ -274,12 +294,21 @@ impl App {
                 Outcome::Cancel => self.prompt = None,
                 Outcome::Submit => {
                     // Surrounding spaces may matter in a text query, not in jq.
-                    let query = match prompt.kind {
-                        FilterKind::Text => prompt.text.as_str(),
-                        FilterKind::Jq => prompt.text.trim(),
+                    let result = match prompt.kind {
+                        PromptKind::Filter(FilterKind::Text) => {
+                            let spec = Spec::new(FilterKind::Text, prompt.text.as_str());
+                            self.start_filter(spec)
+                        }
+                        PromptKind::Filter(FilterKind::Jq) => {
+                            let spec = Spec::new(FilterKind::Jq, prompt.text.trim());
+                            self.start_filter(spec)
+                        }
+                        PromptKind::View => {
+                            let code = prompt.text.trim().to_string();
+                            self.set_view(&code)
+                        }
                     };
-                    let spec = Spec::new(prompt.kind, query);
-                    match self.start_filter(spec) {
+                    match result {
                         Ok(()) => self.prompt = None,
                         Err(e) => {
                             if let Some(p) = &mut self.prompt {
@@ -296,9 +325,11 @@ impl App {
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Esc if self.job.is_some() => self.job = None,
             KeyCode::Esc if self.filter.is_some() => self.clear_filter(),
+            KeyCode::Esc if self.view.is_some() => self.view = None,
             KeyCode::Esc => self.focus = Focus::List,
-            KeyCode::Char('/') => self.open_prompt(FilterKind::Text),
-            KeyCode::Char('|') => self.open_prompt(FilterKind::Jq),
+            KeyCode::Char('/') => self.open_prompt(PromptKind::Filter(FilterKind::Text)),
+            KeyCode::Char('|') => self.open_prompt(PromptKind::Filter(FilterKind::Jq)),
+            KeyCode::Char('>') => self.open_prompt(PromptKind::View),
             KeyCode::Char('c') => self.color = !self.color,
             KeyCode::Char('y') => self.copy_selected(false),
             KeyCode::Char('Y') => self.copy_selected(true),
@@ -361,6 +392,9 @@ impl App {
     pub fn copy_text(&self, raw: bool) -> Option<String> {
         let i = self.selected_line()?;
         let view = self.source.read();
+        if !raw && let Some(text) = self.view.as_ref().and_then(|p| p.text(view.raw(i))) {
+            return Some(text);
+        }
         let line = view.line(i);
         if !raw
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
@@ -388,12 +422,43 @@ impl App {
 
     /// Open the input prompt, pre-filled with the active query of that kind
     /// (or the one still running).
-    fn open_prompt(&mut self, kind: FilterKind) {
-        let current = self.job.as_ref().map(|j| &j.spec).or(self.filter.as_ref());
-        let initial = current
-            .filter(|s| s.kind == kind)
-            .map_or("", |s| s.query.as_str());
-        self.prompt = Some(Prompt::new(kind, initial));
+    fn open_prompt(&mut self, kind: PromptKind) {
+        let initial = match kind {
+            PromptKind::Filter(fk) => {
+                let current = self.job.as_ref().map(|j| &j.spec).or(self.filter.as_ref());
+                current
+                    .filter(|s| s.kind == fk)
+                    .map_or(String::new(), |s| s.query.clone())
+            }
+            PromptKind::View => self.view.as_ref().map_or(String::new(), |v| v.code.clone()),
+        };
+        self.prompt = Some(Prompt::new(kind, &initial));
+    }
+
+    /// Set the jq view expression; empty clears it.
+    pub fn set_view(&mut self, code: &str) -> Result<(), String> {
+        self.view = if code.is_empty() {
+            None
+        } else {
+            Some(Projection::new(code)?)
+        };
+        self.preview_cache.clear();
+        Ok(())
+    }
+
+    /// List text of line `i` under the jq view (cached), or `None` without a
+    /// view or when the line is not JSON.
+    pub fn view_preview(&mut self, i: usize) -> Option<String> {
+        let view = self.view.as_ref()?;
+        if let Some(p) = self.preview_cache.get(&i) {
+            return Some(p.clone());
+        }
+        let preview = view.preview(self.source.read().raw(i))?;
+        if self.preview_cache.len() > 10_000 {
+            self.preview_cache.clear();
+        }
+        self.preview_cache.insert(i, preview.clone());
+        Some(preview)
     }
 
     /// Start filtering in the background, cancelling any running filter. An
@@ -780,6 +845,42 @@ mod tests {
         assert_eq!(a.copy_text(true).unwrap(), "{\"b\":1,\"a\":[1]}");
         press(&mut a, KeyCode::Down);
         assert_eq!(a.copy_text(false).unwrap(), "not json");
+    }
+
+    #[test]
+    fn jq_view_via_prompt_changes_preview_detail_and_copy() {
+        let src = Source::from_bytes(b"{\"a\":{\"b\":1},\"m\":\"hi\"}\nnot json\n".to_vec());
+        let mut a = App::new(PathBuf::from("x"), src, false);
+        press(&mut a, KeyCode::Char('>'));
+        type_str(&mut a, ".a");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.prompt.is_none());
+        let text = |lines: &[Line]| lines.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(text(a.detail_lines(0)), ["{", "  \"b\": 1", "}"]);
+        assert_eq!(a.view_preview(0).as_deref(), Some(r#"{"b":1}"#));
+        assert_eq!(a.copy_text(false).unwrap(), "{\n  \"b\": 1\n}");
+        assert_eq!(a.copy_text(true).unwrap(), r#"{"a":{"b":1},"m":"hi"}"#);
+        // Non-JSON lines are shown as before.
+        assert_eq!(a.view_preview(1), None);
+        assert!(text(a.detail_lines(1))[0].starts_with("✗ invalid JSON"));
+
+        // Reopening the prompt is pre-filled; Esc clears the view.
+        press(&mut a, KeyCode::Char('>'));
+        assert_eq!(a.prompt.as_ref().unwrap().text, ".a");
+        press(&mut a, KeyCode::Esc);
+        press(&mut a, KeyCode::Esc);
+        assert!(a.view.is_none());
+        assert_eq!(text(a.detail_lines(0))[1], "  \"a\": {");
+    }
+
+    #[test]
+    fn invalid_view_keeps_prompt_open() {
+        let mut a = app_with_lines(1);
+        press(&mut a, KeyCode::Char('>'));
+        type_str(&mut a, ".[");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.prompt.as_ref().unwrap().error.is_some());
+        assert!(a.view.is_none());
     }
 
     #[test]

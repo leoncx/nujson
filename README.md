@@ -40,7 +40,8 @@ truncation) is reloaded. Lines that are not valid JSON are marked with `✗`.
 | `←` `→` | scroll detail horizontally (wrap off) |
 | `/` | text filter: case-insensitive unless the query has an uppercase letter; matches are highlighted |
 | `\|` | jq filter: keeps lines where the expression yields a value other than `false`/`null` |
-| `Esc` | cancel a running filter, then clear the filter |
+| `>` | jq view: show the expression's output instead of the line, in the list and the detail pane (e.g. `.ts + " " + .msg`); `y` copies it |
+| `Esc` | cancel a running filter, then clear the filter, then clear the view |
 | `w` | toggle line wrap |
 | `c` | toggle JSON colors |
 | `y` / `Y` | copy the selected line: pretty JSON / raw (system clipboard, or OSC 52 over SSH) |

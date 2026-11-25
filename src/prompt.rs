@@ -4,6 +4,23 @@ use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::filter::FilterKind;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Text (`/`) or jq (`|`) filter.
+    Filter(FilterKind),
+    /// jq view expression (`>`).
+    View,
+}
+
+impl PromptKind {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            PromptKind::Filter(k) => k.symbol(),
+            PromptKind::View => ">",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Editing,
@@ -13,7 +30,7 @@ pub enum Outcome {
 
 #[derive(Debug)]
 pub struct Prompt {
-    pub kind: FilterKind,
+    pub kind: PromptKind,
     pub text: String,
     /// Error from the last submit (e.g. invalid jq); cleared on edit.
     pub error: Option<String>,
@@ -22,7 +39,7 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    pub fn new(kind: FilterKind, initial: &str) -> Self {
+    pub fn new(kind: PromptKind, initial: &str) -> Self {
         Self {
             kind,
             error: None,
@@ -93,7 +110,7 @@ mod tests {
 
     #[test]
     fn edit_with_unicode_and_cursor_moves() {
-        let mut p = Prompt::new(FilterKind::Text, "");
+        let mut p = Prompt::new(PromptKind::Filter(FilterKind::Text), "");
         typed(&mut p, "été");
         assert_eq!(p.cursor_col(), 3);
         p.on_key(KeyCode::Left, KeyModifiers::NONE);
@@ -109,7 +126,7 @@ mod tests {
 
     #[test]
     fn ctrl_u_clears_before_cursor_and_outcomes() {
-        let mut p = Prompt::new(FilterKind::Text, "abc");
+        let mut p = Prompt::new(PromptKind::Filter(FilterKind::Text), "abc");
         p.on_key(KeyCode::Left, KeyModifiers::NONE);
         p.on_key(KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert_eq!(p.text, "c");

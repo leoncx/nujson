@@ -15,12 +15,13 @@ type Filter = compile::Filter<jaq_core::Native<Data>>;
 /// `repeat(false)` cannot hang the filter.
 const MAX_OUTPUTS: usize = 1024;
 
-pub struct JqMatcher {
+/// A compiled jq program.
+pub struct Program {
     filter: Filter,
 }
 
-impl JqMatcher {
-    /// Parse and compile `code`. Errors are human-readable, one per line.
+impl Program {
+    /// Parse and compile `code`. Errors are human-readable.
     pub fn new(code: &str) -> Result<Self, String> {
         let defs = jaq_core::defs()
             .chain(jaq_std::defs())
@@ -53,23 +54,35 @@ impl JqMatcher {
         Ok(Self { filter })
     }
 
-    fn keep(&self, input: Val) -> bool {
+    /// Outputs of the program on `input` (at most [`MAX_OUTPUTS`]).
+    pub fn run(&self, input: Val) -> impl Iterator<Item = Result<Val, String>> + '_ {
         let ctx = Ctx::<Data>::new(&self.filter.lut, Vars::new([]));
         self.filter
             .id
             .run((ctx, input))
             .map(unwrap_valr)
             .take(MAX_OUTPUTS)
-            .any(|out| matches!(out, Ok(v) if v.as_bool()))
+            .map(|r| r.map_err(|e| e.to_string()))
+    }
+}
+
+/// Parse one JSON line into a jq value.
+pub fn parse_line(raw: &[u8]) -> Option<Val> {
+    jaq_json::read::parse_single(raw).ok()
+}
+
+pub struct JqMatcher(Program);
+
+impl JqMatcher {
+    pub fn new(code: &str) -> Result<Self, String> {
+        Program::new(code).map(Self)
     }
 }
 
 impl Matcher for JqMatcher {
     fn matches(&self, raw: &[u8]) -> bool {
-        match jaq_json::read::parse_single(raw) {
-            Ok(v) => self.keep(v),
-            Err(_) => false,
-        }
+        parse_line(raw)
+            .is_some_and(|v| self.0.run(v).any(|out| matches!(out, Ok(v) if v.as_bool())))
     }
 }
 

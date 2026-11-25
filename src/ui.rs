@@ -35,7 +35,8 @@ const HELP: &[(&str, &str)] = &[
     ("← →", "scroll detail horizontally (wrap off)"),
     ("/", "text filter (smart case)"),
     ("|", "jq filter, e.g. .level == \"error\""),
-    ("Esc", "cancel running filter / clear filter"),
+    (">", "jq view, e.g. .ts + \" \" + .msg"),
+    ("Esc", "cancel filter / clear filter / clear view"),
     ("w", "toggle line wrap"),
     ("c", "toggle JSON colors"),
     ("y / Y", "copy line: pretty JSON / raw"),
@@ -154,10 +155,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Validity::Invalid => Span::styled("✗", Style::new().fg(Color::Red)),
             _ => Span::raw(" "),
         };
-        let preview: String = app
-            .source
-            .read()
-            .line(line)
+        let text = match app.view_preview(line) {
+            Some(p) => p,
+            None => app.source.read().line(line).into_owned(),
+        };
+        let preview: String = text
             .chars()
             .take(preview_width)
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -188,7 +190,13 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         Some(i) => format!(" Line {} ", i + 1),
         None => " Detail ".to_string(),
     };
-    let block = pane(title, app.focus == Focus::Detail);
+    let mut block = pane(title, app.focus == Focus::Detail);
+    if let Some(view) = &app.view {
+        block = block.title_bottom(Line::styled(
+            format!(" >{} ", view.code),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.detail_height = inner.height as usize;
@@ -251,6 +259,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     key("Tab", "focus".into());
     key("/", "text".into());
     key("|", "jq".into());
+    key(">", "view".into());
     if app.job.is_some() {
         key("Esc", "cancel".into());
     } else if app.filter.is_some() {
@@ -301,6 +310,7 @@ fn dim() -> Style {
 mod tests {
     use super::*;
     use crate::filter::{FilterKind, Spec};
+    use crate::prompt::PromptKind;
     use crate::source::Source;
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::Path;
@@ -349,7 +359,7 @@ mod tests {
         assert!(screen.contains("▶ 3 "), "{screen}");
         assert!(screen.contains("Esc clear"), "{screen}");
 
-        app.prompt = Some(Prompt::new(crate::filter::FilterKind::Text, "warn"));
+        app.prompt = Some(Prompt::new(PromptKind::Filter(FilterKind::Text), "warn"));
         let screen = render(&mut app, 80, 8);
         assert!(
             screen.lines().last().unwrap().starts_with("/warn"),
@@ -375,7 +385,7 @@ mod tests {
         assert!(screen.contains("1 / 5"), "{screen}");
         assert!(screen.contains("└ |.code >= 500 "), "{screen}");
 
-        let mut p = Prompt::new(FilterKind::Jq, ".[");
+        let mut p = Prompt::new(PromptKind::Filter(FilterKind::Jq), ".[");
         p.error = Some("expected term".into());
         app.prompt = Some(p);
         let screen = render(&mut app, 80, 8);
