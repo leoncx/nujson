@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, Validity};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, footer] =
@@ -45,37 +45,37 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let num_width = app.source.len().to_string().len();
-    // "▶ " + number + " "
+    // "▶" + "✗" + number + " "
     let preview_width = (inner.width as usize).saturating_sub(num_width + 3);
 
-    let rows: Vec<Line> = app
-        .visible
-        .iter()
-        .enumerate()
-        .skip(app.list_offset)
-        .take(height)
-        .map(|(pos, &line)| {
-            let is_sel = pos == app.selected;
-            let marker = if is_sel { "▶ " } else { "  " };
-            let preview: String = app
-                .source
-                .line(line)
-                .chars()
-                .take(preview_width)
-                .map(|c| if c.is_control() { ' ' } else { c })
-                .collect();
-            let row = Line::from(vec![
-                Span::raw(marker),
-                Span::styled(format!("{:>num_width$} ", line + 1), dim()),
-                Span::raw(preview),
-            ]);
-            if is_sel {
-                row.style(Style::new().add_modifier(Modifier::REVERSED))
-            } else {
-                row
-            }
-        })
-        .collect();
+    let end = (app.list_offset + height).min(app.visible.len());
+    let mut rows = Vec::with_capacity(end - app.list_offset);
+    for pos in app.list_offset..end {
+        let line = app.visible[pos];
+        let is_sel = pos == app.selected;
+        let status = match app.validity(line) {
+            Validity::Invalid => Span::styled("✗", Style::new().fg(Color::Red)),
+            _ => Span::raw(" "),
+        };
+        let preview: String = app
+            .source
+            .line(line)
+            .chars()
+            .take(preview_width)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let row = Line::from(vec![
+            Span::raw(if is_sel { "▶" } else { " " }),
+            status,
+            Span::styled(format!("{:>num_width$} ", line + 1), dim()),
+            Span::raw(preview),
+        ]);
+        rows.push(if is_sel {
+            row.style(Style::new().add_modifier(Modifier::REVERSED))
+        } else {
+            row
+        });
+    }
     frame.render_widget(Paragraph::new(rows), inner);
 }
 
@@ -93,8 +93,7 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         app.detail_max_scroll = 0;
         return;
     };
-    let text = app.source.line(line).into_owned();
-    let mut para = Paragraph::new(text);
+    let mut para = Paragraph::new(app.detail_lines(line).to_vec());
     if app.wrap {
         para = para.wrap(Wrap { trim: false });
     }
@@ -176,9 +175,9 @@ mod tests {
         let screen = render(&mut app, 80, 10);
         assert!(screen.contains("sample.ndjson · 5 lines"), "{screen}");
         assert!(screen.contains("▶ 1 {\"ts\""), "{screen}");
-        assert!(screen.contains("  4 this line is not json"), "{screen}");
+        assert!(screen.contains(" ✗4 this line is not json"), "{screen}");
         assert!(screen.contains("Line 1"), "{screen}");
-        assert!(screen.contains("server started"), "{screen}");
+        assert!(screen.contains(r#""msg": "server started","#), "{screen}");
         assert!(screen.contains("wrap (on)"), "{screen}");
     }
 
@@ -196,11 +195,14 @@ mod tests {
     #[test]
     fn detail_max_scroll_reflects_wrapping() {
         let mut app = fixture_app();
-        app.selected = 1; // the longest line
-        render(&mut app, 60, 6);
-        assert!(app.detail_max_scroll > 0);
+        app.selected = 1; // multi-line pretty output
+        // Narrow detail pane so some pretty lines must wrap.
+        render(&mut app, 40, 6);
+        let wrapped = app.detail_max_scroll;
         app.wrap = false;
-        render(&mut app, 60, 6);
-        assert_eq!(app.detail_max_scroll, 0);
+        render(&mut app, 40, 6);
+        let unwrapped = app.detail_max_scroll;
+        assert!(unwrapped > 0);
+        assert!(wrapped > unwrapped, "{wrapped} <= {unwrapped}");
     }
 }

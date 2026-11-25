@@ -4,8 +4,28 @@ use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
+use ratatui::text::Line;
+
+use crate::render::pretty::{Theme, pretty};
 use crate::source::Source;
 use crate::ui;
+
+/// Parse state of a line, computed lazily and cached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Validity {
+    Unknown,
+    Valid,
+    /// Empty or whitespace-only: tolerated in NDJSON, not flagged as an error.
+    Blank,
+    Invalid,
+}
+
+/// Rendered detail view of one line, reused across frames.
+pub struct DetailCache {
+    pub line: usize,
+    pub color: bool,
+    pub lines: Vec<Line<'static>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -32,12 +52,15 @@ pub struct App {
     pub detail_height: usize,
     /// Max vertical scroll of the detail pane from the last draw.
     pub detail_max_scroll: u16,
+    validity: Vec<Validity>,
+    detail_cache: Option<DetailCache>,
     should_quit: bool,
 }
 
 impl App {
     pub fn new(path: PathBuf, source: Source, color: bool) -> Self {
         let visible = (0..source.len()).collect();
+        let validity = vec![Validity::Unknown; source.len()];
         Self {
             path,
             source,
@@ -52,6 +75,8 @@ impl App {
             list_height: 1,
             detail_height: 1,
             detail_max_scroll: 0,
+            validity,
+            detail_cache: None,
             should_quit: false,
         }
     }
@@ -59,6 +84,36 @@ impl App {
     /// Original (0-based) line index of the selection, if any.
     pub fn selected_line(&self) -> Option<usize> {
         self.visible.get(self.selected).copied()
+    }
+
+    /// Whether line `i` is valid JSON (cached; does not build a `Value`).
+    pub fn validity(&mut self, i: usize) -> Validity {
+        if self.validity[i] == Validity::Unknown {
+            let raw = self.source.raw(i);
+            self.validity[i] = if raw.iter().all(u8::is_ascii_whitespace) {
+                Validity::Blank
+            } else if serde_json::from_slice::<serde::de::IgnoredAny>(raw).is_ok() {
+                Validity::Valid
+            } else {
+                Validity::Invalid
+            };
+        }
+        self.validity[i]
+    }
+
+    /// Styled lines for the detail pane of line `i`, rendered once per
+    /// (line, color) and cached.
+    pub fn detail_lines(&mut self, i: usize) -> &[Line<'static>] {
+        let fresh = matches!(&self.detail_cache, Some(c) if c.line == i && c.color == self.color);
+        if !fresh {
+            let lines = render_detail(&self.source, i, self.color);
+            self.detail_cache = Some(DetailCache {
+                line: i,
+                color: self.color,
+                lines,
+            });
+        }
+        &self.detail_cache.as_ref().expect("just filled").lines
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -148,6 +203,29 @@ impl App {
     }
 }
 
+fn render_detail(source: &Source, i: usize, color: bool) -> Vec<Line<'static>> {
+    use ratatui::style::{Color, Modifier, Style};
+
+    let raw = source.raw(i);
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return vec![Line::styled(
+            "(empty line)",
+            Style::new().fg(Color::DarkGray),
+        )];
+    }
+    match serde_json::from_slice::<serde_json::Value>(raw) {
+        Ok(value) => pretty(&value, &Theme::for_color(color)),
+        Err(err) => {
+            let err_style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+            vec![
+                Line::styled(format!("✗ invalid JSON: {err}"), err_style),
+                Line::default(),
+                Line::raw(source.line(i).into_owned()),
+            ]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +242,33 @@ mod tests {
 
     fn press(a: &mut App, code: KeyCode) {
         a.on_key(code, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn validity_and_detail_rendering() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"{\"a\":1}\nnope\n  \n").unwrap();
+        let source = Source::open(f.path()).unwrap();
+        let mut a = App::new(f.path().to_path_buf(), source, false);
+        assert_eq!(a.validity(0), Validity::Valid);
+        assert_eq!(a.validity(1), Validity::Invalid);
+        assert_eq!(a.validity(2), Validity::Blank);
+
+        let text = |lines: &[Line]| lines.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        assert_eq!(text(a.detail_lines(0)), ["{", "  \"a\": 1", "}"]);
+        let bad = text(a.detail_lines(1));
+        assert!(bad[0].starts_with("✗ invalid JSON:"), "{bad:?}");
+        assert_eq!(bad[2], "nope");
+        assert_eq!(text(a.detail_lines(2)), ["(empty line)"]);
+    }
+
+    #[test]
+    fn detail_cache_invalidates_on_color_toggle() {
+        let mut a = app_with_lines(1);
+        let colored = a.detail_lines(0).to_vec();
+        press(&mut a, KeyCode::Char('c'));
+        let plain = a.detail_lines(0).to_vec();
+        assert_ne!(colored, plain);
     }
 
     #[test]

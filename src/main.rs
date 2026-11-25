@@ -1,4 +1,5 @@
 mod app;
+mod render;
 mod source;
 mod ui;
 
