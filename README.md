@@ -43,6 +43,7 @@ truncation) is reloaded. Lines that are not valid JSON are marked with `✗`.
 | `Esc` | cancel a running filter, then clear the filter |
 | `w` | toggle line wrap |
 | `c` | toggle JSON colors |
+| `y` / `Y` | copy the selected line: pretty JSON / raw (system clipboard, or OSC 52 over SSH) |
 | `?` | help |
 | `q` `Ctrl-C` | quit |
 

@@ -8,6 +8,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 
 use ratatui::text::Line;
 
+use crate::clipboard::Clipboard;
 use crate::filter::{FilterKind, Job, JobResult, Matcher, Spec};
 use crate::prompt::{Outcome, Prompt};
 use crate::render::highlight::{highlight_line, match_style};
@@ -31,6 +32,12 @@ pub struct DetailCache {
     pub color: bool,
     pub highlight: Option<String>,
     pub lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    Info(String),
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,8 +69,9 @@ pub struct App {
     pub filter: Option<Spec>,
     /// Filter being computed in the background; replaces `filter` when done.
     pub job: Option<Job>,
-    /// One-off error message shown in the footer until the next key press.
-    pub status: Option<String>,
+    /// One-off message shown in the footer until the next key press.
+    pub status: Option<Status>,
+    clipboard: Clipboard,
     /// Whether the key help popup is shown; any key closes it.
     pub show_help: bool,
     /// Open input prompt; while set, it receives all keys.
@@ -106,6 +114,7 @@ impl App {
             filter: None,
             job: None,
             status: None,
+            clipboard: Clipboard::default(),
             show_help: false,
             prompt: None,
             matcher: None,
@@ -136,10 +145,10 @@ impl App {
             self.selected = 0;
             self.list_offset = 0;
             self.detail_cache = None;
-            self.status = Some("file was truncated; reloaded".into());
+            self.status = Some(Status::Info("file was truncated; reloaded".into()));
         }
         if let Some(e) = self.source.error() {
-            self.status = Some(e);
+            self.status = Some(Status::Error(e));
         }
         let len = self.source.len();
         if len <= self.total {
@@ -291,6 +300,8 @@ impl App {
             KeyCode::Char('/') => self.open_prompt(FilterKind::Text),
             KeyCode::Char('|') => self.open_prompt(FilterKind::Jq),
             KeyCode::Char('c') => self.color = !self.color,
+            KeyCode::Char('y') => self.copy_selected(false),
+            KeyCode::Char('Y') => self.copy_selected(true),
             KeyCode::Char('w') => {
                 self.wrap = !self.wrap;
                 self.detail_scroll = 0;
@@ -345,6 +356,36 @@ impl App {
         }
     }
 
+    /// Text copied by `y` (pretty JSON, or the raw line if it is not JSON)
+    /// or `Y` (raw line).
+    pub fn copy_text(&self, raw: bool) -> Option<String> {
+        let i = self.selected_line()?;
+        let view = self.source.read();
+        let line = view.line(i);
+        if !raw
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+            && let Ok(pretty) = serde_json::to_string_pretty(&v)
+        {
+            return Some(pretty);
+        }
+        Some(line.into_owned())
+    }
+
+    fn copy_selected(&mut self, raw: bool) {
+        let (Some(i), Some(text)) = (self.selected_line(), self.copy_text(raw)) else {
+            return;
+        };
+        let what = if raw { "raw" } else { "pretty" };
+        self.status = Some(match self.clipboard.copy(&text) {
+            Ok(dest) => Status::Info(format!(
+                "copied line {} ({what}, {} bytes) to the {dest}",
+                i + 1,
+                text.len()
+            )),
+            Err(e) => Status::Error(e),
+        });
+    }
+
     /// Open the input prompt, pre-filled with the active query of that kind
     /// (or the one still running).
     fn open_prompt(&mut self, kind: FilterKind) {
@@ -396,7 +437,11 @@ impl App {
                 self.set_visible(lines);
             }
             Err(e) => {
-                self.status = Some(format!("{}{}: {e}", job.spec.kind.symbol(), job.spec.query))
+                self.status = Some(Status::Error(format!(
+                    "{}{}: {e}",
+                    job.spec.kind.symbol(),
+                    job.spec.query
+                )))
             }
         }
     }
@@ -721,7 +766,20 @@ mod tests {
         a.sync_source();
         assert_eq!(a.total, 1);
         assert_eq!(a.visible, vec![0]);
-        assert!(a.status.as_deref().unwrap().contains("truncated"));
+        assert!(matches!(&a.status, Some(Status::Info(m)) if m.contains("truncated")));
+    }
+
+    #[test]
+    fn copy_text_pretty_and_raw() {
+        let src = Source::from_bytes(b"{\"b\":1,\"a\":[1]}\nnot json\n".to_vec());
+        let mut a = App::new(PathBuf::from("x"), src, true);
+        assert_eq!(
+            a.copy_text(false).unwrap(),
+            "{\n  \"b\": 1,\n  \"a\": [\n    1\n  ]\n}"
+        );
+        assert_eq!(a.copy_text(true).unwrap(), "{\"b\":1,\"a\":[1]}");
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.copy_text(false).unwrap(), "not json");
     }
 
     #[test]

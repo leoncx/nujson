@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
-use crate::app::{App, Focus, Validity};
+use crate::app::{App, Focus, Status, Validity};
 use crate::prompt::Prompt;
 use crate::render::highlight::{highlight_line, match_style};
 
@@ -38,6 +38,7 @@ const HELP: &[(&str, &str)] = &[
     ("Esc", "cancel running filter / clear filter"),
     ("w", "toggle line wrap"),
     ("c", "toggle JSON colors"),
+    ("y / Y", "copy line: pretty JSON / raw"),
     ("?", "this help"),
     ("q  Ctrl-C", "quit"),
 ];
@@ -225,11 +226,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         draw_prompt(frame, prompt, area);
         return;
     }
-    if let Some(msg) = &app.status {
-        frame.render_widget(
-            Paragraph::new(format!("✗ {msg}")).style(Style::new().fg(Color::Red)),
-            area,
-        );
+    if let Some(status) = &app.status {
+        let para = match status {
+            Status::Error(msg) => {
+                Paragraph::new(format!("✗ {msg}")).style(Style::new().fg(Color::Red))
+            }
+            Status::Info(msg) => {
+                Paragraph::new(format!("✓ {msg}")).style(Style::new().fg(Color::Green))
+            }
+        };
+        frame.render_widget(para, area);
         return;
     }
     let on_off = |b: bool| if b { "on" } else { "off" };
