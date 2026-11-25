@@ -1,4 +1,6 @@
 mod app;
+mod filter;
+mod prompt;
 mod render;
 mod source;
 mod ui;

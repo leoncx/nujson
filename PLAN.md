@@ -38,6 +38,7 @@ src/
 ├── event.rs         # Key → Action
 ├── render/pretty.rs # Value → Vec<Line> (colored/plain), Theme
 ├── filter/          # text.rs (smart-case substring), jq.rs (jaq, truthy = keep)
+├── prompt.rs        # single-line input for / and |
 └── ui/              # list, detail, input prompt, status/help
 ```
 
@@ -48,14 +49,14 @@ src/
 
 ## Keybindings
 
-`↑/↓ j/k` move · `PgUp/PgDn` · `g/G` top/bottom · `Tab` focus · `/` text search · `|` jq filter · `n/N` next/prev · `Esc` clear · `c` color · `w` wrap · `?` help · `q` quit
+`↑/↓ j/k` move · `PgUp/PgDn` · `g/G` top/bottom · `Tab` focus · `/` text filter · `|` jq filter · `Esc` clear filter · `c` color · `w` wrap · `?` help · `q` quit
 
 ## Milestones
 
 - [x] **M1 Skeleton** — cargo project, clap, terminal setup/restore (incl. panic), CI matrix (ubuntu/macos/windows: fmt, clippy, test).
 - [x] **M2 Viewer** — mmap + line index, left list, right raw view, navigation & scrolling.
 - [x] **M3 Pretty + highlight** — renderer, theme, `c` toggle, `--no-color`, `NO_COLOR` env.
-- [ ] **M4 Text search/filter** — input prompt, smart-case substring, match count, `n/N`.
+- [x] **M4 Text filter** — `/` prompt, smart-case substring, match count, Esc clears (selection kept). `n/N` dropped: the list is already filtered.
 - [ ] **M5 jq filter** — jaq, compile errors in prompt, background eval with progress.
 - [ ] **M6 Polish** — help popup, match highlighting in detail, stdin input, release binaries (`cargo-dist`).
 - [ ] **M7 Later** — follow mode (`-f`), copy to clipboard, jq projection of detail view, config file.

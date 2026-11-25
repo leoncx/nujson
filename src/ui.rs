@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Validity};
+use crate::prompt::Prompt;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, footer] =
@@ -23,17 +24,33 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let block = pane(
-        format!(" {file_name} · {} lines ", app.source.len()),
-        app.focus == Focus::List,
-    );
+    let title = match &app.filter {
+        None => format!(" {file_name} · {} lines ", app.source.len()),
+        Some(_) => format!(
+            " {file_name} · {} / {} ",
+            app.visible.len(),
+            app.source.len()
+        ),
+    };
+    let mut block = pane(title, app.focus == Focus::List);
+    if let Some(q) = &app.filter {
+        block = block.title_bottom(Line::styled(
+            format!(" /{q} "),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let height = inner.height as usize;
     app.list_height = height;
     if app.visible.is_empty() {
-        frame.render_widget(Paragraph::new("(empty)").style(dim()), inner);
+        let msg = if app.filter.is_some() {
+            "(no match — Esc to clear)"
+        } else {
+            "(empty)"
+        };
+        frame.render_widget(Paragraph::new(msg).style(dim()), inner);
         return;
     }
 
@@ -107,6 +124,10 @@ fn draw_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(prompt) = &app.prompt {
+        draw_prompt(frame, prompt, area);
+        return;
+    }
     let on_off = |b: bool| if b { "on" } else { "off" };
     let mut spans = vec![];
     let mut key = |k: &str, desc: String| {
@@ -118,6 +139,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     };
     key("↑↓", "move".into());
     key("Tab", "focus".into());
+    key("/", "filter".into());
+    if app.filter.is_some() {
+        key("Esc", "clear".into());
+    }
     if app.focus == Focus::Detail && !app.wrap {
         key("←→", "scroll".into());
     }
@@ -125,6 +150,24 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     key("c", format!("color ({})", on_off(app.color)));
     key("q", "quit".into());
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_prompt(frame: &mut Frame, prompt: &Prompt, area: Rect) {
+    let symbol = prompt.kind.symbol();
+    let avail = (area.width as usize).saturating_sub(symbol.len() + 1);
+    // Scroll the input horizontally so the cursor stays visible.
+    let skip = prompt.cursor_col().saturating_sub(avail);
+    let shown: String = prompt.text.chars().skip(skip).collect();
+    let line = Line::from(vec![
+        Span::styled(
+            symbol,
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(shown),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+    let x = area.x + (symbol.len() + prompt.cursor_col() - skip) as u16;
+    frame.set_cursor_position((x.min(area.right().saturating_sub(1)), area.y));
 }
 
 fn pane(title: impl Into<String>, focused: bool) -> Block<'static> {
@@ -179,6 +222,30 @@ mod tests {
         assert!(screen.contains("Line 1"), "{screen}");
         assert!(screen.contains(r#""msg": "server started","#), "{screen}");
         assert!(screen.contains("wrap (on)"), "{screen}");
+    }
+
+    #[test]
+    fn filter_title_prompt_and_no_match() {
+        let mut app = fixture_app();
+        app.apply_text_filter("error");
+        let screen = render(&mut app, 80, 8);
+        assert!(screen.contains("sample.ndjson · 1 / 5"), "{screen}");
+        assert!(screen.contains("└ /error "), "{screen}");
+        assert!(screen.contains("▶ 3 "), "{screen}");
+        assert!(screen.contains("Esc clear"), "{screen}");
+
+        app.prompt = Some(Prompt::new(crate::prompt::PromptKind::Text, "warn"));
+        let screen = render(&mut app, 80, 8);
+        assert!(
+            screen.lines().last().unwrap().starts_with("/warn"),
+            "{screen}"
+        );
+
+        app.prompt = None;
+        app.apply_text_filter("nothing-matches-this");
+        let screen = render(&mut app, 80, 8);
+        assert!(screen.contains("(no match — Esc to clear)"), "{screen}");
+        assert!(screen.contains(" Detail "), "{screen}");
     }
 
     #[test]

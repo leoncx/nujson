@@ -6,6 +6,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 
 use ratatui::text::Line;
 
+use crate::filter::{self, text::TextMatcher};
+use crate::prompt::{Outcome, Prompt, PromptKind};
 use crate::render::pretty::{Theme, pretty};
 use crate::source::Source;
 use crate::ui;
@@ -39,7 +41,7 @@ pub struct App {
     pub color: bool,
     pub wrap: bool,
     pub focus: Focus,
-    /// Line indices currently shown in the list (all lines until filters land).
+    /// Line indices currently shown in the list (all lines, or filter matches).
     pub visible: Vec<usize>,
     /// Position in `visible` of the selected entry.
     pub selected: usize,
@@ -52,6 +54,10 @@ pub struct App {
     pub detail_height: usize,
     /// Max vertical scroll of the detail pane from the last draw.
     pub detail_max_scroll: u16,
+    /// Active text filter, if any.
+    pub filter: Option<String>,
+    /// Open input prompt; while set, it receives all keys.
+    pub prompt: Option<Prompt>,
     validity: Vec<Validity>,
     detail_cache: Option<DetailCache>,
     should_quit: bool,
@@ -75,6 +81,8 @@ impl App {
             list_height: 1,
             detail_height: 1,
             detail_max_scroll: 0,
+            filter: None,
+            prompt: None,
             validity,
             detail_cache: None,
             should_quit: false,
@@ -130,9 +138,30 @@ impl App {
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+        if let Some(prompt) = &mut self.prompt {
+            match prompt.on_key(code, mods) {
+                Outcome::Editing => {}
+                Outcome::Cancel => self.prompt = None,
+                Outcome::Submit => {
+                    let query = std::mem::take(&mut prompt.text);
+                    self.prompt = None;
+                    self.apply_text_filter(&query);
+                }
+            }
+            return;
+        }
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.should_quit = true,
+            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Esc if self.filter.is_some() => self.clear_filter(),
+            KeyCode::Esc => self.focus = Focus::List,
+            KeyCode::Char('/') => {
+                let initial = self.filter.as_deref().unwrap_or("");
+                self.prompt = Some(Prompt::new(PromptKind::Text, initial));
+            }
             KeyCode::Char('c') => self.color = !self.color,
             KeyCode::Char('w') => {
                 self.wrap = !self.wrap;
@@ -185,6 +214,37 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::List,
             _ => {}
+        }
+    }
+
+    /// Filter the list to lines containing `query` (smart case). An empty
+    /// query clears the filter.
+    pub fn apply_text_filter(&mut self, query: &str) {
+        if query.is_empty() {
+            self.clear_filter();
+            return;
+        }
+        let visible = filter::run(&self.source, &TextMatcher::new(query));
+        self.filter = Some(query.to_string());
+        self.set_visible(visible);
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter = None;
+        self.set_visible((0..self.source.len()).collect());
+    }
+
+    /// Replace the visible lines, keeping the selection on the same original
+    /// line when it is still shown, otherwise on the next one after it.
+    fn set_visible(&mut self, visible: Vec<usize>) {
+        let prev = self.selected_line();
+        self.visible = visible;
+        self.list_offset = 0;
+        let pos = prev.map_or(0, |l| self.visible.partition_point(|&v| v < l));
+        self.selected = pos.min(self.visible.len().saturating_sub(1));
+        if self.selected_line() != prev {
+            self.detail_scroll = 0;
+            self.detail_hscroll = 0;
         }
     }
 
@@ -269,6 +329,70 @@ mod tests {
         press(&mut a, KeyCode::Char('c'));
         let plain = a.detail_lines(0).to_vec();
         assert_ne!(colored, plain);
+    }
+
+    fn type_str(a: &mut App, s: &str) {
+        for c in s.chars() {
+            press(a, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn text_filter_via_prompt_and_esc_clears() {
+        // Lines: {"i":0} .. {"i":11}
+        let mut a = app_with_lines(12);
+        press(&mut a, KeyCode::Char('/'));
+        assert!(a.prompt.is_some());
+        // Keys typed in the prompt must not trigger shortcuts (q, c, ...).
+        type_str(&mut a, "i\":1");
+        press(&mut a, KeyCode::Enter);
+        assert!(a.prompt.is_none());
+        assert!(!a.should_quit);
+        assert_eq!(a.filter.as_deref(), Some("i\":1"));
+        assert_eq!(a.visible, vec![1, 10, 11]);
+
+        press(&mut a, KeyCode::Down);
+        assert_eq!(a.selected_line(), Some(10));
+        press(&mut a, KeyCode::Esc);
+        assert_eq!(a.filter, None);
+        assert_eq!(a.visible.len(), 12);
+        assert_eq!(a.selected_line(), Some(10), "selection kept after clear");
+    }
+
+    #[test]
+    fn filter_selects_next_match_after_previous_selection() {
+        let mut a = app_with_lines(12);
+        a.select(5);
+        a.apply_text_filter("1");
+        assert_eq!(a.visible, vec![1, 10, 11]);
+        assert_eq!(a.selected_line(), Some(10));
+        a.select(0);
+        a.apply_text_filter("1}");
+        assert_eq!(a.visible, vec![1, 11]);
+        assert_eq!(a.selected_line(), Some(1));
+    }
+
+    #[test]
+    fn filter_with_no_match_and_empty_query() {
+        let mut a = app_with_lines(3);
+        a.apply_text_filter("zzz");
+        assert!(a.visible.is_empty());
+        assert_eq!(a.selected_line(), None);
+        press(&mut a, KeyCode::Down);
+        a.apply_text_filter("");
+        assert_eq!(a.filter, None);
+        assert_eq!(a.visible.len(), 3);
+    }
+
+    #[test]
+    fn prompt_is_prefilled_and_esc_cancels() {
+        let mut a = app_with_lines(3);
+        a.apply_text_filter("1");
+        press(&mut a, KeyCode::Char('/'));
+        assert_eq!(a.prompt.as_ref().unwrap().text, "1");
+        press(&mut a, KeyCode::Esc);
+        assert!(a.prompt.is_none());
+        assert_eq!(a.filter.as_deref(), Some("1"), "cancel keeps filter");
     }
 
     #[test]
